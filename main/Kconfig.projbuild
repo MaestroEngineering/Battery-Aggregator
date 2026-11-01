@@ -1,0 +1,23 @@
+menu "BMS aggregator"
+
+    config BMS_BOOT_BUTTON_GPIO
+        int "BOOT button GPIO (long press = factory reset)"
+        default 0
+        help
+            GPIO of the BOOT button (active low). Holding it for
+            BMS_FACTORY_RESET_HOLD_S seconds erases all settings.
+
+    config BMS_FACTORY_RESET_HOLD_S
+        int "Seconds to hold BOOT for a factory reset"
+        default 10
+        range 5 30
+
+    config BMS_SELFTEST_TIMEOUT_S
+        int "Seconds a new OTA image has to pass its self-test"
+        default 60
+        range 30 300
+        help
+            If a freshly updated image has not passed its self-test within
+            this time it is marked invalid and the previous image is booted.
+
+endmenu

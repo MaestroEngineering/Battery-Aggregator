@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMS Aggregator setup</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/theme.js"></script>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">BMS Aggregator · Setup</span>
+    <button id="theme" class="theme-btn" type="button" title="Toggle light/dark">◐</button>
+  </div>
+</header>
+<main>
+  <form id="setup" class="card login">
+    <h1>First-time setup</h1>
+    <p class="hint">This device has no password yet. Choose your WiFi and an admin password. Setup is only finished once the device has joined your WiFi.</p>
+
+    <label for="ssid">WiFi network</label>
+    <div class="row">
+      <input id="ssid" type="text" maxlength="32" required list="ssid-list" autocomplete="off">
+      <button id="scan" type="button">Scan</button>
+    </div>
+    <datalist id="ssid-list"></datalist>
+
+    <label for="pass">WiFi password</label>
+    <input id="pass" type="password" maxlength="63" autocomplete="off">
+    <p class="hint">Empty for an open network.</p>
+
+    <label for="admin">Admin password (8+ characters)</label>
+    <input id="admin" type="password" minlength="8" maxlength="64" autocomplete="new-password" required>
+    <label for="admin2">Repeat admin password</label>
+    <input id="admin2" type="password" minlength="8" maxlength="64" autocomplete="new-password" required>
+
+    <label for="appass">Recovery AP password (8+ characters)</label>
+    <input id="appass" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
+    <p class="hint">If the device cannot join your WiFi later, it brings back its own access point protected by this password, so you can fix the settings.</p>
+
+    <div class="actions"><button id="go" class="primary" type="submit">Connect and finish</button></div>
+    <div id="msg" class="msg hidden"></div>
+  </form>
+</main>
+<script src="/setup.js"></script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+# Common ESP-IDF settings for every chip and flash size.
+# Chip/flash-specific values live in config/sdkconfig.flash_<size>, selected by
+# platformio.ini [target].
+
+# --- OTA and rollback (bootloader) -----------------------------------------
+# A freshly OTA'd image boots in PENDING_VERIFY state. If it resets before the
+# app marks itself valid, the bootloader boots the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# --- App descriptor ----------------------------------------------------------
+# Version comes from VERSION via PROJECT_VER; date/time fields are filled in.
+CONFIG_APP_COMPILE_TIME_DATE=y
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
+
+# --- Watchdogs: a hung task resets the chip (which also triggers rollback of
+# an unverified image).
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+
+# --- Size / misc --------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# --- Logging: plain text (no ANSI colours) so the web log stays readable,
+# wall-clock timestamps once NTP has synced.
+CONFIG_LOG_VERSION_1=y
+CONFIG_LOG_COLORS=n
+CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
+
+# --- HTTP server --------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=256
+
+# --- Network ----------------------------------------------------------------
+CONFIG_LWIP_LOCAL_HOSTNAME="bms-agg"
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_NETIF_LOOPBACK=y
+CONFIG_LWIP_SNTP_MAX_SERVERS=1

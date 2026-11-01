@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMS Aggregator</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/theme.js"></script>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">BMS Aggregator</span>
+    <nav id="nav" class="hidden">
+      <a href="#dashboard" data-view="dashboard">Dashboard</a>
+      <a href="#system" data-view="system">System</a>
+      <a href="#firmware" data-view="firmware">Firmware</a>
+      <a href="#log" data-view="log">Log</a>
+    </nav>
+    <button id="theme" class="theme-btn" type="button" title="Toggle light/dark">◐</button>
+    <button id="logout" class="theme-btn hidden" type="button">Log out</button>
+  </div>
+</header>
+
+<main>
+  <!-- Login -->
+  <section id="v-login" class="hidden">
+    <form id="login-form" class="card login">
+      <h1>Log in</h1>
+      <label for="login-pw">Admin password</label>
+      <input id="login-pw" type="password" autocomplete="current-password" required>
+      <div class="actions"><button class="primary" type="submit">Log in</button></div>
+      <div id="login-msg" class="msg bad hidden"></div>
+    </form>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="v-dashboard" class="hidden">
+    <h1>Dashboard</h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Firmware</h2>
+        <dl class="kv">
+          <dt>Version</dt><dd id="d-version">-</dd>
+          <dt>Git</dt><dd id="d-git">-</dd>
+          <dt>Built</dt><dd id="d-build">-</dd>
+          <dt>ESP-IDF</dt><dd id="d-idf">-</dd>
+          <dt>Chip</dt><dd id="d-chip">-</dd>
+          <dt>Self-test</dt><dd id="d-selftest">-</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <h2>System</h2>
+        <dl class="kv">
+          <dt>Uptime</dt><dd id="d-uptime">-</dd>
+          <dt>Free heap</dt><dd id="d-heap">-</dd>
+          <dt>Min free heap</dt><dd id="d-heapmin">-</dd>
+          <dt>Reset reason</dt><dd id="d-reset">-</dd>
+          <dt>Time</dt><dd id="d-time">-</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <h2>Network</h2>
+        <dl class="kv">
+          <dt>Mode</dt><dd id="d-mode">-</dd>
+          <dt>WiFi</dt><dd id="d-ssid">-</dd>
+          <dt>RSSI</dt><dd id="d-rssi">-</dd>
+          <dt>IP</dt><dd id="d-ip">-</dd>
+          <dt>Hostname</dt><dd id="d-host">-</dd>
+          <dt>Recovery AP</dt><dd id="d-ap">-</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- System -->
+  <section id="v-system" class="hidden">
+    <h1>System</h1>
+    <div class="grid">
+      <form id="f-wifi" class="card">
+        <h2>WiFi</h2>
+        <label for="wifi-ssid">Network name (SSID)</label>
+        <div class="row">
+          <input id="wifi-ssid" type="text" maxlength="32" required list="wifi-list" autocomplete="off">
+          <button id="wifi-scan" type="button">Scan</button>
+        </div>
+        <datalist id="wifi-list"></datalist>
+        <label for="wifi-pass">Password</label>
+        <input id="wifi-pass" type="password" maxlength="63" autocomplete="new-password">
+        <p class="hint">Leave empty for an open network. If the new network fails, the recovery AP comes back after about 30 s.</p>
+        <div class="actions"><button class="primary" type="submit">Save and reconnect</button></div>
+        <div class="msg hidden"></div>
+      </form>
+
+      <form id="f-password" class="card">
+        <h2>Admin password</h2>
+        <label for="pw-cur">Current password</label>
+        <input id="pw-cur" type="password" autocomplete="current-password" required>
+        <label for="pw-new">New password (8+ characters)</label>
+        <input id="pw-new" type="password" minlength="8" maxlength="64" autocomplete="new-password" required>
+        <label for="pw-new2">Repeat new password</label>
+        <input id="pw-new2" type="password" minlength="8" maxlength="64" autocomplete="new-password" required>
+        <div class="actions"><button class="primary" type="submit">Change password</button></div>
+        <div class="msg hidden"></div>
+      </form>
+
+      <form id="f-host" class="card">
+        <h2>Hostname</h2>
+        <label for="host">Hostname</label>
+        <input id="host" type="text" maxlength="32" pattern="[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?" required>
+        <p class="hint">Reachable as <b id="host-preview">bms-agg</b>.local</p>
+        <div class="actions"><button class="primary" type="submit">Save</button></div>
+        <div class="msg hidden"></div>
+      </form>
+
+      <form id="f-time" class="card">
+        <h2>Time</h2>
+        <label for="ntp">NTP server</label>
+        <input id="ntp" type="text" maxlength="64" required>
+        <label for="tz">Timezone (POSIX TZ string)</label>
+        <input id="tz" type="text" maxlength="64" required>
+        <p class="hint">Examples: <code>SAST-2</code> (South Africa), <code>UTC0</code>, <code>CET-1CEST,M3.5.0,M10.5.0/3</code></p>
+        <div class="actions"><button class="primary" type="submit">Save</button></div>
+        <div class="msg hidden"></div>
+      </form>
+
+      <div class="card">
+        <h2>Configuration backup</h2>
+        <p class="hint">Exports hostname, time and firmware settings as JSON. Passwords and WiFi credentials are never exported or imported.</p>
+        <div class="actions">
+          <a class="btn" href="/api/config/export" download="bms-agg-config.json">Export JSON</a>
+        </div>
+        <label for="import-file">Import JSON</label>
+        <input id="import-file" type="file" accept="application/json,.json">
+        <div class="actions"><button id="import-btn" type="button">Import</button></div>
+        <div id="import-msg" class="msg hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>Restart and reset</h2>
+        <p class="hint">Factory reset erases WiFi, passwords and all settings; the device restarts into the setup access point. Holding the BOOT button for 10 s does the same.</p>
+        <div class="actions">
+          <button id="reboot-btn" type="button">Restart</button>
+          <button id="reset-btn" class="danger" type="button">Factory reset…</button>
+        </div>
+        <div id="reset-msg" class="msg hidden"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Firmware -->
+  <section id="v-firmware" class="hidden">
+    <h1>Firmware</h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Slots</h2>
+        <dl class="kv">
+          <dt>Running</dt><dd id="fw-running">-</dd>
+          <dt>Other slot</dt><dd id="fw-other">-</dd>
+          <dt>Next boot</dt><dd id="fw-boot">-</dd>
+          <dt>Self-test</dt><dd id="fw-selftest">-</dd>
+        </dl>
+        <div class="actions"><button id="rollback-btn" type="button" disabled>Roll back to other slot</button></div>
+        <div id="rollback-msg" class="msg hidden"></div>
+      </div>
+      <form id="f-ota" class="card">
+        <h2>Update</h2>
+        <label for="ota-file">Firmware image (.bin)</label>
+        <input id="ota-file" type="file" accept=".bin,application/octet-stream" required>
+        <p class="hint">The image is written to the other slot and checked (chip, project, checksum) before the device switches to it. A new image must pass its self-test within 60 s, otherwise the device returns to the current firmware by itself.</p>
+        <label class="check"><input id="sig-req" type="checkbox"> Require signed images <span class="hint">(not available in Phase 1: enabling it rejects every upload)</span></label>
+        <div class="actions"><button id="ota-btn" class="primary" type="submit">Upload and install</button></div>
+        <div class="progress hidden" id="ota-prog"><div></div></div>
+        <div id="ota-msg" class="msg hidden"></div>
+      </form>
+    </div>
+  </section>
+
+  <!-- Log -->
+  <section id="v-log" class="hidden">
+    <h1>Log</h1>
+    <div class="row">
+      <button id="log-refresh" type="button">Refresh</button>
+      <label class="check"><input id="log-auto" type="checkbox" checked> Auto-refresh</label>
+    </div>
+    <p class="hint">Last ~200 lines since boot.</p>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -66,3 +66,12 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# PlatformIO / ESP-IDF build output
+.pio/
+managed_components/
+sdkconfig.bms-agg
+sdkconfig.bms-agg-selftest-fail
+sdkconfig.old
+components/webserver/generated/
+release/
