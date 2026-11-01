@@ -16,6 +16,9 @@
 #include "internal.h"
 #include "net/net.h"
 #include "ota/ota.h"
+#include "can/can.h"
+#include "diag/diag.h"
+#include <ctype.h>
 #include "webserver/webserver.h"
 
 // Fixed at compile time: the build never queries git.
@@ -200,6 +203,11 @@ esp_err_t h_status(httpd_req_t* req) {
     cJSON_AddBoolToObject(o, "time_synced", net::time_synced());
     cJSON_AddStringToObject(o, "selftest", ota::selftest_state());
     cJSON_AddStringToObject(o, "selftest_detail", ota::selftest_detail());
+    can::Status cs = can::status();
+    cJSON_AddStringToObject(o, "can_state", can::state_name(cs.state));
+    cJSON_AddNumberToObject(o, "can_bitrate", cs.bitrate);
+    cJSON_AddNumberToObject(o, "can_fps", cs.fps);
+    cJSON_AddStringToObject(o, "diag_state", diag::status().state);
     return send_json(req, o);
 }
 
@@ -226,7 +234,25 @@ cJSON* settings_json(bool for_export) {
     cJSON_AddStringToObject(sys, "timezone", s.timezone.c_str());
     cJSON* ota = cJSON_AddObjectToObject(o, "ota");
     cJSON_AddBoolToObject(ota, "require_signed_images", s.require_signed_images);
+    cJSON* can = cJSON_AddObjectToObject(o, "can");
+    cJSON_AddBoolToObject(can, "enabled", s.can_enabled);
+    cJSON_AddNumberToObject(can, "bitrate", s.can_bitrate);
+    cJSON* dg = cJSON_AddObjectToObject(o, "diag");
+    cJSON_AddBoolToObject(dg, "enabled", s.diag_enabled);
+    cJSON_AddStringToObject(dg, "url", s.diag_url.c_str());
+    cJSON_AddNumberToObject(dg, "batch", s.diag_batch);
+    cJSON_AddNumberToObject(dg, "flush_s", s.diag_flush_s);
+    cJSON_AddBoolToObject(dg, "change_only", s.diag_change_only);
+    cJSON_AddNumberToObject(dg, "pretrigger_s", s.diag_pretrig_s);
+    cJSON* tr = cJSON_AddObjectToObject(o, "trigger");
+    cJSON_AddBoolToObject(tr, "enabled", s.trig_enabled);
+    char id[16];
+    snprintf(id, sizeof(id), "0x%lX", (unsigned long)s.trig_id);
+    cJSON_AddStringToObject(tr, "id", id);
+    cJSON_AddStringToObject(tr, "baseline", s.trig_baseline.c_str());
     if (!for_export) {
+        // Never exported: the token is a secret. Only whether one is set.
+        cJSON_AddBoolToObject(dg, "token_set", !cfg::diag_token().empty());
         cJSON* w = cJSON_AddObjectToObject(o, "wifi");
         cJSON_AddStringToObject(w, "ssid", cfg::wifi_ssid().c_str());
     }
@@ -235,9 +261,50 @@ cJSON* settings_json(bool for_export) {
 
 esp_err_t h_settings_get(httpd_req_t* req) { return send_json(req, settings_json(false)); }
 
-// Validates and applies {system:{...}, ota:{...}}. All-or-nothing.
+// Typed field readers for apply_settings. They reject unknown keys and wrong types.
+struct Section {
+    cJSON* obj;
+    const char* name;
+    std::string& err;
+    bool bad = false;
+    bool fail(const std::string& m) {
+        if (!bad) err = m;
+        bad = true;
+        return false;
+    }
+    bool check_keys(std::initializer_list<const char*> keys) {
+        for (cJSON* it = obj->child; it; it = it->next) {
+            bool known = false;
+            for (const char* k : keys) known |= strcmp(it->string, k) == 0;
+            if (!known) return fail(std::string("unknown key '") + name + "." + it->string + "'");
+        }
+        return true;
+    }
+    void str(const char* k, std::string& out) {
+        cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, k);
+        if (!v) return;
+        if (!cJSON_IsString(v)) fail(std::string(name) + "." + k + " must be a string");
+        else out = v->valuestring;
+    }
+    void boolean(const char* k, bool& out) {
+        cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, k);
+        if (!v) return;
+        if (!cJSON_IsBool(v)) fail(std::string(name) + "." + k + " must be true or false");
+        else out = cJSON_IsTrue(v);
+    }
+    void u32(const char* k, uint32_t& out) {
+        cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, k);
+        if (!v) return;
+        if (!cJSON_IsNumber(v) || v->valuedouble < 0 || v->valuedouble > 4294967295.0)
+            fail(std::string(name) + "." + k + " must be a non-negative number");
+        else out = (uint32_t)v->valuedouble;
+    }
+};
+
+// Validates and applies {system, ota, can, diag, trigger}. All-or-nothing.
 esp_err_t apply_settings(cJSON* j, std::string& err, bool strict_top) {
-    static const char* kTop[] = {"schema", "schema_version", "firmware", "exported_at", "system", "ota"};
+    static const char* kTop[] = {"schema", "schema_version", "firmware", "exported_at",
+                                 "system", "ota", "can", "diag", "trigger"};
     if (strict_top) {
         cJSON* schema = cJSON_GetObjectItemCaseSensitive(j, "schema");
         if (!cJSON_IsString(schema) || strcmp(schema->valuestring, "bms-agg-config") != 0) {
@@ -258,68 +325,80 @@ esp_err_t apply_settings(cJSON* j, std::string& err, bool strict_top) {
             return ESP_ERR_INVALID_ARG;
         }
     }
-    cfg::Settings cur = cfg::get(), next = cur;
-    cJSON* sys = cJSON_GetObjectItemCaseSensitive(j, "system");
-    if (sys) {
-        if (!cJSON_IsObject(sys)) {
-            err = "'system' must be an object";
-            return ESP_ERR_INVALID_ARG;
+    const cfg::Settings cur = cfg::get();
+    cfg::Settings next = cur;
+    auto section = [&](const char* name) -> cJSON* {
+        cJSON* o = cJSON_GetObjectItemCaseSensitive(j, name);
+        if (o && !cJSON_IsObject(o)) {
+            err = std::string("'") + name + "' must be an object";
+            return (cJSON*)-1;
         }
-        for (cJSON* it = sys->child; it; it = it->next) {
-            std::string k = it->string;
-            if (!cJSON_IsString(it)) {
-                err = "system." + k + " must be a string";
-                return ESP_ERR_INVALID_ARG;
-            }
-            if (k == "hostname") next.hostname = it->valuestring;
-            else if (k == "ntp_server") next.ntp_server = it->valuestring;
-            else if (k == "timezone") next.timezone = it->valuestring;
-            else {
-                err = "unknown key 'system." + k + "'";
-                return ESP_ERR_INVALID_ARG;
-            }
+        return o;
+    };
+    bool bad = false;
+    if (cJSON* o = section("system")) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "system", err};
+        s.check_keys({"hostname", "ntp_server", "timezone"});
+        s.str("hostname", next.hostname);
+        s.str("ntp_server", next.ntp_server);
+        s.str("timezone", next.timezone);
+        bad |= s.bad;
+    }
+    if (cJSON* o = section("ota"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "ota", err};
+        s.check_keys({"require_signed_images"});
+        s.boolean("require_signed_images", next.require_signed_images);
+        bad |= s.bad;
+    }
+    if (cJSON* o = section("can"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "can", err};
+        s.check_keys({"enabled", "bitrate"});
+        s.boolean("enabled", next.can_enabled);
+        s.u32("bitrate", next.can_bitrate);
+        bad |= s.bad;
+    }
+    if (cJSON* o = section("diag"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "diag", err};
+        // token_set is read-only; tolerated so a GET result can be posted back.
+        s.check_keys({"enabled", "url", "batch", "flush_s", "change_only", "pretrigger_s", "token_set"});
+        s.boolean("enabled", next.diag_enabled);
+        s.str("url", next.diag_url);
+        s.u32("batch", next.diag_batch);
+        s.u32("flush_s", next.diag_flush_s);
+        s.boolean("change_only", next.diag_change_only);
+        s.u32("pretrigger_s", next.diag_pretrig_s);
+        bad |= s.bad;
+    }
+    if (cJSON* o = section("trigger"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "trigger", err};
+        s.check_keys({"enabled", "id", "baseline"});
+        s.boolean("enabled", next.trig_enabled);
+        std::string id;
+        s.str("id", id);
+        if (!id.empty()) {
+            char* end = nullptr;
+            unsigned long v = strtoul(id.c_str(), &end, 0);
+            if (!end || *end) s.fail("trigger.id must be a number like 0x35A");
+            else next.trig_id = (uint32_t)v;
         }
+        s.str("baseline", next.trig_baseline);
+        for (char& c : next.trig_baseline) c = toupper((unsigned char)c);
+        bad |= s.bad;
     }
-    cJSON* ota = cJSON_GetObjectItemCaseSensitive(j, "ota");
-    if (ota) {
-        if (!cJSON_IsObject(ota)) {
-            err = "'ota' must be an object";
-            return ESP_ERR_INVALID_ARG;
-        }
-        for (cJSON* it = ota->child; it; it = it->next) {
-            if (strcmp(it->string, "require_signed_images") == 0 && cJSON_IsBool(it))
-                next.require_signed_images = cJSON_IsTrue(it);
-            else {
-                err = std::string("bad key 'ota.") + it->string + "'";
-                return ESP_ERR_INVALID_ARG;
-            }
-        }
-    }
-    if (!cfg::valid_hostname(next.hostname)) {
-        err = "hostname: 1-32 letters, digits or '-'";
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!cfg::valid_ntp_server(next.ntp_server)) {
-        err = "invalid NTP server";
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!cfg::valid_timezone(next.timezone)) {
-        err = "invalid timezone string";
-        return ESP_ERR_INVALID_ARG;
-    }
-    esp_err_t e = ESP_OK;
-    if (next.hostname != cur.hostname) {
-        e = cfg::set_hostname(next.hostname);
-        if (e == ESP_OK) net::apply_hostname();
-    }
-    if (e == ESP_OK && (next.ntp_server != cur.ntp_server || next.timezone != cur.timezone)) {
-        e = cfg::set_ntp(next.ntp_server, next.timezone);
-        if (e == ESP_OK) net::apply_time_config();
-    }
-    if (e == ESP_OK && next.require_signed_images != cur.require_signed_images)
-        e = cfg::set_require_signed_images(next.require_signed_images);
-    if (e != ESP_OK) err = std::string("saving failed: ") + esp_err_to_name(e);
-    return e;
+    if (bad) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t e = cfg::save(next, err);
+    if (e != ESP_OK) return e;
+    if (next.hostname != cur.hostname) net::apply_hostname();
+    if (next.ntp_server != cur.ntp_server || next.timezone != cur.timezone) net::apply_time_config();
+    if (next.can_enabled != cur.can_enabled || next.can_bitrate != cur.can_bitrate) can::apply_settings();
+    diag::apply_settings();
+    return ESP_OK;
 }
 
 esp_err_t h_settings_post(httpd_req_t* req) {
@@ -526,6 +605,7 @@ void register_api(httpd_handle_t h) {
     add_route(h, "/api/ota/info", HTTP_GET, h_ota_info, R_AUTH);
     add_route(h, "/api/ota/upload", HTTP_POST, h_ota_upload, R_AUTH);
     add_route(h, "/api/ota/rollback", HTTP_POST, h_ota_rollback, R_AUTH);
+    register_can_api(h);
 }
 
 }  // namespace webserver

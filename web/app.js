@@ -2,7 +2,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const VIEWS = ['dashboard', 'system', 'firmware', 'log'];
+const VIEWS = ['dashboard', 'can', 'system', 'firmware', 'log'];
 let timer = null;
 
 // ---- API ------------------------------------------------------------------
@@ -69,7 +69,7 @@ function route() {
   VIEWS.forEach((v) => $('v-' + v).classList.toggle('hidden', v !== view));
   document.querySelectorAll('#nav a').forEach((a) =>
     a.classList.toggle('active', a.dataset.view === view));
-  ({ dashboard: loadDashboard, system: loadSystem, firmware: loadFirmware, log: loadLog })[view]();
+  ({ dashboard: loadDashboard, can: () => loadCan(), system: loadSystem, firmware: loadFirmware, log: loadLog })[view]();
 }
 
 // Dashboard
@@ -95,6 +95,8 @@ async function refreshStatus() {
     setText('d-ip', s.ip);
     setText('d-host', s.hostname + '.local');
     setText('d-ap', s.ap_up ? s.ap_ssid + ' (on)' : 'off');
+    setText('d-can', s.can_state === 'off' ? 'off' : s.can_state + ', ' + (s.can_bitrate / 1000) + ' kbit/s, ' + s.can_fps + ' frames/s');
+    setText('d-diag', s.diag_state);
   } catch (e) { if (e.status !== 401) setText('d-uptime', 'offline: ' + e.message); }
 }
 function loadDashboard() { refreshStatus(); timer = setInterval(refreshStatus, 2000); }
@@ -109,7 +111,8 @@ async function loadSystem() {
     $('host-preview').textContent = s.system.hostname;
     $('ntp').value = s.system.ntp_server;
     $('tz').value = s.system.timezone;
-  } catch (e) { /* login shown on 401 */ }
+  } catch (e) { return; /* login shown on 401 */ }
+  loadDiag();  // can.js
 }
 
 function bindForm(id, fn) {

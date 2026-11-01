@@ -28,6 +28,8 @@ std::string sta_ip();
 std::string ap_ssid();
 std::string connected_ssid();
 bool time_synced();
+// unix_us = esp_timer_get_time() + offset; 0 while the clock is not NTP-synced.
+int64_t epoch_offset_us();
 
 // --- Setup (first boot) -------------------------------------------------------
 // Tries the given WiFi while the setup AP stays up. Only when the station gets

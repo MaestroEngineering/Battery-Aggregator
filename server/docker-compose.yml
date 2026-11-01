@@ -1,0 +1,14 @@
+# Minimal reference server for Verbose Diagnostics (receiver API + SQLite).
+#   cp .env.example .env   # set BMS_TOKEN
+#   docker compose up -d --build
+# Device setting: http://<this-host>:8080/api/v1/batches, same token.
+services:
+  receiver:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      BMS_TOKEN: ${BMS_TOKEN:?set BMS_TOKEN in .env}
+    volumes:
+      - ./data:/data

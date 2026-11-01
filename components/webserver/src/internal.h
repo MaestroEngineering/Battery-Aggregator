@@ -14,6 +14,7 @@ enum : unsigned {
 };
 
 void register_api(httpd_handle_t h);
+void register_can_api(httpd_handle_t h);  // CAN tap, capture stream, diagnostics
 void add_route(httpd_handle_t h, const char* uri, httpd_method_t method,
                esp_err_t (*fn)(httpd_req_t*), unsigned flags);
 

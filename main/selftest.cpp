@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "can/can.h"
 #include "config/config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -36,6 +37,9 @@ bool http_answers() {
             char buf[64] = {};
             int n = recv(s, buf, sizeof(buf) - 1, 0);
             ok = n > 12 && strncmp(buf, "HTTP/1.", 7) == 0 && strncmp(buf + 9, "200", 3) == 0;
+            // Read to EOF so the server is not reset mid-send (logs "error in send : 104").
+            char sink[64];
+            while (n > 0) n = recv(s, sink, sizeof(sink), 0);
         }
     }
     close(s);
@@ -51,6 +55,9 @@ const char* check(bool& pass) {
     if (!webserver::running()) return "HTTP server not started";
     if (!(net::sta_connected() || net::ap_up())) return "neither WiFi nor AP is up";
     if (!http_answers()) return "HTTP server does not answer";
+    // SPEC.md: "CAN controllers initialised" - required only when the tap is enabled.
+    const char* why = nullptr;
+    if (!can::selftest_ok(&why)) return why;
     pass = true;
     return "all checks passed";
 }

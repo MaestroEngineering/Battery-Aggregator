@@ -131,3 +131,17 @@ pre.log {
 
 .login { max-width: 380px; margin: 10vh auto; }
 .theme-btn { padding: 6px 10px; }
+
+/* CAN page */
+.grow { flex: 1 1 120px; min-width: 0; }
+.grow2 { flex: 2 1 180px; min-width: 0; }
+h2.grow { margin: 0; }
+h2.sub { margin: 18px 0 4px; font-size: 15px; }
+.tablewrap { overflow-x: auto; margin-top: 10px; }
+table.frames { border-collapse: collapse; width: 100%; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+table.frames th, table.frames td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.frames th { color: var(--muted); font-weight: 600; font-family: system-ui, sans-serif; }
+table.frames td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.frames tr.stale td { color: var(--muted); }
+.b { padding: 0 1px; border-radius: 3px; }
+.b.chg { background: var(--accent); color: var(--accent-text); }

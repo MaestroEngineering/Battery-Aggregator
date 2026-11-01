@@ -105,7 +105,7 @@ esp_err_t serve_asset(httpd_req_t* req, const char* path) {
     httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     httpd_resp_set_hdr(req, "Content-Security-Policy",
-                       "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'");
+                       "default-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'");
 
     FILE* f = s_fs_ok ? fopen(fs_path(path).c_str(), "rb") : nullptr;
     if (!f) return httpd_resp_send(req, (const char*)a->data, a->len);

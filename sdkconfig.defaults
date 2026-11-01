@@ -34,6 +34,10 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y
 # --- HTTP server --------------------------------------------------------------
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=256
+# Live CAN capture stream (WebSocket).
+CONFIG_HTTPD_WS_SUPPORT=y
+# Session check before the WebSocket upgrade.
+CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 
 # --- Network ----------------------------------------------------------------
 CONFIG_LWIP_LOCAL_HOSTNAME="bms-agg"

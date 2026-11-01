@@ -1,3 +1,7 @@
-# Phase 1: placeholder only. CAN support (three MCP2515 modules) arrives in a
-# later phase; see SPEC.md "Build order".
-idf_component_register(INCLUDE_DIRS "include")
+# Phase 2: one MCP2515 in listen-only mode (the tap on port A).
+# Nothing in this component can transmit on the CAN bus: see mcp2515_regs.h.
+idf_component_register(SRCS "src/mcp2515.cpp" "src/tap.cpp"
+                       INCLUDE_DIRS "include"
+                       PRIV_INCLUDE_DIRS "src"
+                       REQUIRES esp_common
+                       PRIV_REQUIRES esp_driver_spi esp_driver_gpio esp_timer esp_system freertos config)

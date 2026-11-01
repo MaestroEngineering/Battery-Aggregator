@@ -175,7 +175,7 @@ void add_route(httpd_handle_t h, const char* uri, httpd_method_t method,
 
 esp_err_t start() {
     httpd_config_t c = HTTPD_DEFAULT_CONFIG();
-    c.max_uri_handlers = 40;
+    c.max_uri_handlers = 56;
     c.stack_size = 10240;
     c.lru_purge_enable = true;
     c.uri_match_fn = httpd_uri_match_wildcard;

@@ -13,6 +13,7 @@
     <span class="brand">BMS Aggregator</span>
     <nav id="nav" class="hidden">
       <a href="#dashboard" data-view="dashboard">Dashboard</a>
+      <a href="#can" data-view="can">CAN</a>
       <a href="#system" data-view="system">System</a>
       <a href="#firmware" data-view="firmware">Firmware</a>
       <a href="#log" data-view="log">Log</a>
@@ -57,6 +58,8 @@
           <dt>Min free heap</dt><dd id="d-heapmin">-</dd>
           <dt>Reset reason</dt><dd id="d-reset">-</dd>
           <dt>Time</dt><dd id="d-time">-</dd>
+          <dt>CAN tap</dt><dd id="d-can">-</dd>
+          <dt>Diagnostics</dt><dd id="d-diag">-</dd>
         </dl>
       </div>
       <div class="card">
@@ -70,6 +73,88 @@
           <dt>Recovery AP</dt><dd id="d-ap">-</dd>
         </dl>
       </div>
+    </div>
+  </section>
+
+  <!-- CAN tap -->
+  <section id="v-can" class="hidden">
+    <h1>CAN tap</h1>
+    <p class="hint">Port A (MCP2515 #2) in <b>listen-only</b> mode: the gateway never transmits, acknowledges or sends error frames on this bus.</p>
+    <div class="grid">
+      <div class="card">
+        <h2>Status</h2>
+        <dl class="kv">
+          <dt>State</dt><dd id="c-state">-</dd>
+          <dt>Bitrate</dt><dd id="c-bitrate">-</dd>
+          <dt>Frames</dt><dd id="c-frames">-</dd>
+          <dt>Rate</dt><dd id="c-fps">-</dd>
+          <dt>Last frame</dt><dd id="c-age">-</dd>
+          <dt>IDs</dt><dd id="c-ids">-</dd>
+          <dt>Bus errors</dt><dd id="c-errors">-</dd>
+          <dt>RX overflows</dt><dd id="c-ovr">-</dd>
+          <dt>RX error counter</dt><dd id="c-rec">-</dd>
+          <dt>Blocked TX cmds</dt><dd id="c-blocked">-</dd>
+          <dt>RAM buffer</dt><dd id="c-ring">-</dd>
+        </dl>
+      </div>
+      <form id="f-can" class="card">
+        <h2>Settings</h2>
+        <label class="check"><input id="can-en" type="checkbox"> Enable the tap</label>
+        <p class="hint">While enabled, a missing or faulty MCP2515 makes a new firmware fail its self-test (and roll back).</p>
+        <label for="can-br">Bitrate</label>
+        <select id="can-br">
+          <option value="125000">125 kbit/s</option>
+          <option value="250000">250 kbit/s</option>
+          <option value="500000">500 kbit/s</option>
+        </select>
+        <p class="hint">8 MHz crystal: 1 Mbit/s is not possible.</p>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button id="can-detect" type="button">Detect bitrate</button>
+        </div>
+        <div class="msg hidden"></div>
+        <div id="detect-out" class="hidden">
+          <dl class="kv" id="detect-list"></dl>
+          <div class="actions"><button id="detect-apply" type="button" class="hidden"></button></div>
+        </div>
+      </form>
+      <div class="card">
+        <h2>Capture</h2>
+        <p class="hint">Streams every frame to this browser. The device only keeps the last ~1500 frames; the file saved here is the long record.</p>
+        <div class="actions">
+          <button id="cap-start" class="primary" type="button">Start capture</button>
+          <button id="cap-stop" type="button" disabled>Stop</button>
+          <button id="cap-clear" type="button">Clear</button>
+        </div>
+        <dl class="kv">
+          <dt>Captured</dt><dd id="cap-n">0 frames</dd>
+          <dt>Missed</dt><dd id="cap-drop">0</dd>
+        </dl>
+        <label for="cap-fmt">Save as</label>
+        <div class="row">
+          <select id="cap-fmt">
+            <option value="csv">CSV</option>
+            <option value="asc">Vector .asc</option>
+            <option value="candump">candump log</option>
+          </select>
+          <button id="cap-save" type="button">Save capture</button>
+          <button id="cap-buf" type="button">Save device buffer</button>
+        </div>
+        <div id="cap-msg" class="msg hidden"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <h2 class="grow">Live frames</h2>
+        <button id="tbl-reset" type="button">Reset</button>
+      </div>
+      <div class="tablewrap">
+        <table id="tbl" class="frames">
+          <thead><tr><th>ID</th><th>Count</th><th>Period</th><th>Age</th><th>DLC</th><th>Data</th><th>Min</th><th>Max</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">Highlighted bytes changed since the previous refresh (1 s). Min/max are per byte since the last reset.</p>
     </div>
   </section>
 
@@ -122,6 +207,36 @@
         <p class="hint">Examples: <code>SAST-2</code> (South Africa), <code>UTC0</code>, <code>CET-1CEST,M3.5.0,M10.5.0/3</code></p>
         <div class="actions"><button class="primary" type="submit">Save</button></div>
         <div class="msg hidden"></div>
+      </form>
+
+      <form id="f-diag" class="card">
+        <h2>Verbose Diagnostics</h2>
+        <p class="hint">Uploads CAN traffic in batches to a server you run (see <code>server/</code> in the repository). Off by default.</p>
+        <label class="check"><input id="dg-en" type="checkbox"> Enable upload</label>
+        <label for="dg-url">Server URL</label>
+        <input id="dg-url" type="text" maxlength="200" placeholder="http://192.168.0.7:8080/api/v1/batches">
+        <label for="dg-tok">Token</label>
+        <input id="dg-tok" type="password" maxlength="128" autocomplete="off" placeholder="unchanged">
+        <p class="hint" id="dg-tok-hint">Leave empty to keep the stored token. Never exported.</p>
+        <div class="row">
+          <div class="grow"><label for="dg-batch">Batch (frames)</label><input id="dg-batch" type="text" inputmode="numeric"></div>
+          <div class="grow"><label for="dg-flush">Flush every (s)</label><input id="dg-flush" type="text" inputmode="numeric"></div>
+          <div class="grow"><label for="dg-pre">Pre-trigger (s)</label><input id="dg-pre" type="text" inputmode="numeric"></div>
+        </div>
+        <label class="check"><input id="dg-chg" type="checkbox"> Change-only (changed frames + a full snapshot every minute)</label>
+        <h2 class="sub">Event trigger</h2>
+        <label class="check"><input id="tr-en" type="checkbox"> Raise an event when this frame leaves its baseline</label>
+        <div class="row">
+          <div class="grow"><label for="tr-id">CAN ID</label><input id="tr-id" type="text" maxlength="12"></div>
+          <div class="grow2"><label for="tr-base">Baseline (hex)</label><input id="tr-base" type="text" maxlength="16"></div>
+        </div>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button id="dg-test" type="button">Send test event</button>
+          <button id="tr-clear" type="button">Re-arm trigger</button>
+        </div>
+        <div class="msg hidden"></div>
+        <dl class="kv" id="dg-status"></dl>
       </form>
 
       <div class="card">
@@ -188,5 +303,6 @@
   </section>
 </main>
 <script src="/app.js"></script>
+<script src="/can.js"></script>
 </body>
 </html>

@@ -4,7 +4,12 @@ A device that allows multiple incompatible batteries on different CAN networks t
 
 An open-source BMS CAN aggregator gateway on an ESP32. The full design is in [SPEC.md](SPEC.md).
 
-**Status: Phase 1 (platform bring-up).** The device can be flashed once over USB and from then on updated over WiFi. It has WiFi provisioning, a web UI, and OTA with automatic rollback. There is **no CAN code yet**.
+**Status: Phase 2 (listen-only tap and Verbose Diagnostics).**
+
+- **Phase 1:** the device is flashed once over USB and from then on updated over WiFi. It has WiFi provisioning, a web UI, and OTA with automatic rollback.
+- **Phase 2:** one MCP2515 (port A) runs in **listen-only** mode. It provides a live frame table, capture download, listen-only bitrate detection, and Verbose Diagnostics upload to a minimal reference server.
+
+Nothing transmits on the CAN bus yet. The inverter output and the combine engine come in later phases.
 
 ## Contents
 
@@ -14,6 +19,8 @@ An open-source BMS CAN aggregator gateway on an ESP32. The full design is in [SP
 - [OTA updates](#ota-updates)
 - [Testing rollback and rejection](#testing-rollback-and-rejection)
 - [Factory reset](#factory-reset)
+- [CAN tap (Phase 2)](#can-tap-phase-2)
+- [Verbose Diagnostics and the reference server](#verbose-diagnostics-and-the-reference-server)
 - [Partition layout](#partition-layout)
 - [Changing chip or flash size](#changing-chip-or-flash-size)
 - [Web UI and API](#web-ui-and-api)
@@ -133,6 +140,81 @@ There are two ways:
 
 Both erase the whole NVS partition (WiFi credentials, admin password hash, recovery AP password, all settings) and format LittleFS, then reboot into the setup AP. The firmware in both OTA slots is kept.
 
+## CAN tap (Phase 2)
+
+### Wiring (classic ESP32, approved pin map)
+
+| Signal | GPIO | | Signal | GPIO |
+| --- | --- | --- | --- | --- |
+| SPI SCK | 18 | | CS #1 INV | 25 |
+| SPI MOSI | 23 | | CS #2 **A (tap)** | **26** |
+| SPI MISO | 19 | | CS #3 B | 27 |
+| INT #1 INV | 34 | | INT #2 **A (tap)** | **35** |
+| INT #3 B | 36 | | BOOT button | 0 |
+
+The pin map lives in `components/can/include/can/pins.h`. Phase 2 uses only **module #2** (port A).
+
+- The common 5 V MCP2515 boards need a **level shifter** on SCK, MOSI, MISO and the CS lines. Each INT line needs a **divider** (for example 10k/20k).
+- Add **10k pull-ups** to 3.3 V on the CS lines.
+- The crystal is **8 MHz**, so the supported bitrates are 125, 250 and 500 kbit/s. 1 Mbit/s is impossible at 8 MHz.
+- SPI runs at 1 MHz.
+- Optional extra safety: on the tap module, tie the TJA1050's pin 8 (S) to VCC. That puts the transceiver in silent mode, so it cannot drive the bus whatever the firmware does.
+
+### Never transmits
+
+- The driver has no transmit function.
+- Every SPI command goes through `mcp2515::spi_command_allowed()`. It refuses:
+  - the transmit-related instructions,
+  - writes to the TX buffers (including TXREQ),
+  - TXnRTS pin modes,
+  - any operating mode other than configuration, listen-only and sleep. Normal mode would acknowledge frames.
+- After configuring the chip, the driver reads the mode back. It checks again every second, and if the chip ever leaves listen-only mode it is forced back to configuration mode.
+- *Blocked TX cmds* on the CAN page counts refused commands. It must stay 0.
+
+### Using it
+
+The tap is **off by default**. While it is enabled, an OTA image only passes its self-test if the MCP2515 is up in listen-only mode. To use it, open **CAN**, tick *Enable the tap*, choose the bitrate and save.
+
+- **Detect bitrate** tries 125, 250 and 500 kbit/s, about 1.5 s each, in listen-only mode. A rate with clean frames is offered as a suggestion; nothing is changed until you apply it.
+- **Live frames** lists each ID with its count, period, age, DLC and data, plus the per-byte min/max since the last reset. Bytes that changed since the previous refresh are highlighted.
+- **Capture** streams every frame to the browser over a WebSocket. *Save capture* writes CSV, Vector `.asc` or a candump log. *Save device buffer* downloads the last ~1500 frames the device holds in RAM. Timestamps are wall-clock once NTP has synced, otherwise time since boot.
+
+## Verbose Diagnostics and the reference server
+
+Verbose Diagnostics is a switch on the System page and is off by default. When it is on, the device posts CAN traffic in batches to a server you run.
+
+- **Batching:** a batch is sent when it reaches the batch size (default 500 frames) or the flush interval passes (default 30 s), and immediately on an event.
+- **When the server is down:** each batch stays in RAM until the server answers HTTP 200. Three batch buffers hold about 1500 frames. Once they are full, the oldest waiting batch is dropped. The next batch that gets through reports how many frames were dropped.
+- **Batch contents:** each batch carries a sequence number (unique per device and boot) and says whether the clock was NTP-synced. The format is in `components/diag/include/diag/batch_format.h`.
+- **Change-only mode:** only frames whose data changed, plus a full snapshot of every ID once a minute.
+- **Event trigger:** fires when a chosen frame leaves its baseline. The default is the Blue Nova 0x35A pattern `A8AA8202A8AA0202`, but the trigger itself is off by default.
+  - The event is logged, and the last N seconds of frames (pre-trigger, default 60 s) are uploaded at once as an event batch.
+  - The trigger latches until the frame returns to its baseline.
+  - *Send test event* raises an event by hand.
+- **Task priority:** the uploader runs in its own low-priority task and never blocks CAN reception.
+- **Token:** the upload token is a secret. It is never shown or exported.
+
+**Reference server** (`server/`): a receiver API with SQLite storage, Python standard library only.
+
+```sh
+cd server
+cp .env.example .env              # set BMS_TOKEN
+docker compose up -d --build      # listens on :8080, data in server/data/
+# without Docker:  BMS_TOKEN=... BMS_DB=./data/bms.db python3 receiver.py
+```
+
+On the device, set the URL to `http://<server>:8080/api/v1/batches` and use the same token.
+
+- The server ignores duplicate batches.
+- It back-fills wall-clock time for frames that were sent before the device's clock synced.
+- It exports CSV, candump or `.asc`:
+
+```sh
+curl -H "Authorization: Bearer $BMS_TOKEN" "http://<server>:8080/api/v1/stats"
+curl -H "Authorization: Bearer $BMS_TOKEN" "http://<server>:8080/api/v1/batches?kind=event"
+curl -H "Authorization: Bearer $BMS_TOKEN" -o cap.asc "http://<server>:8080/api/v1/export?format=asc"
+```
+
 ## Partition layout
 
 The partition tables are `partitions/4MB.csv` (default) and `partitions/8MB.csv`. The 4 MB layout:
@@ -194,6 +276,12 @@ API (all JSON):
 | POST `/api/reboot`, `/api/factory-reset` | login | factory reset needs `{"confirm":"RESET"}` |
 | GET `/api/ota/info`, POST `/api/ota/upload`, `/api/ota/rollback` | login | firmware |
 | GET `/api/log` | login | recent log lines (text) |
+| GET `/api/can/status`, `/api/can/table`, `/api/can/buffer` | login | tap status, live table, RAM buffer (binary) |
+| POST `/api/can/detect`, `/api/can/table/reset` | login | bitrate detection, reset the table |
+| WebSocket `/ws/can` | login | live capture stream (binary) |
+| GET `/api/diag/status`, POST `/api/diag/token`, `/api/diag/test-event`, `/api/diag/clear-trigger` | login | Verbose Diagnostics |
+
+The CAN, diagnostics and trigger settings are part of `/api/settings` and of the config export. The token is never included.
 
 ## Project layout
 
@@ -211,9 +299,11 @@ components/
   webserver/            HTTP server, sessions, rate limiting, JSON API, static files
   ota/                  streamed OTA, image checks, rollback, signature hook
   applog/               ring buffer of recent log lines (named applog: "log" would replace ESP-IDF's own)
-  can/                  empty for now: include/can/pins.h lists the MCP2515 pins (TODO)
+  can/                  MCP2515 listen-only driver + no-transmit guard, tap task, ring buffer, ID table
+  diag/                 Verbose Diagnostics batches and uploader
 web/                    web UI sources
-tools/                  asset packer, PlatformIO pre-build hook, bad-image generator, host test
+tools/                  asset packer, PlatformIO pre-build hook, bad-image generator, host tests
+server/                 reference server: receiver.py (SQLite), Dockerfile, docker-compose.yml
 scripts/release.sh      release build named from VERSION
 ```
 

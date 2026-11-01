@@ -12,9 +12,9 @@ if(NOT EXISTS "${WWW_GEN}")
     endif()
 endif()
 
-idf_component_register(SRCS "src/server.cpp" "src/api.cpp" "src/assets.cpp" "${WWW_GEN}"
+idf_component_register(SRCS "src/server.cpp" "src/api.cpp" "src/assets.cpp" "src/can_api.cpp" "${WWW_GEN}"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "src"
                        REQUIRES esp_http_server
-                       PRIV_REQUIRES config net ota applog espressif__cjson app_update esp_app_format
+                       PRIV_REQUIRES config net ota applog can diag espressif__cjson app_update esp_app_format
                                      esp_timer esp_system esp_hw_support lwip esp_wifi esp_partition)

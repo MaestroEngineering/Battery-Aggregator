@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include <mutex>
@@ -441,6 +442,13 @@ const char* mode_name() {
 bool sta_connected() { return s_has_ip; }
 bool ap_up() { return s_ap_on; }
 bool time_synced() { return s_time_synced; }
+
+int64_t epoch_offset_us() {
+    if (!s_time_synced) return 0;
+    timeval tv;
+    gettimeofday(&tv, nullptr);
+    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec - esp_timer_get_time();
+}
 
 int rssi() {
     if (!s_has_ip) return 0;

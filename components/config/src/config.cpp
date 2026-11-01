@@ -1,7 +1,9 @@
 #include "config/config.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_littlefs.h"
 #include "esp_log.h"
@@ -31,6 +33,18 @@ constexpr const char* K_SALT = "adm_salt";
 constexpr const char* K_HASH = "adm_hash";
 constexpr const char* K_ITER = "adm_iter";
 constexpr const char* K_PROV = "prov";
+constexpr const char* K_CAN_EN = "can_en";
+constexpr const char* K_CAN_BR = "can_br";
+constexpr const char* K_DG_EN = "dg_en";
+constexpr const char* K_DG_URL = "dg_url";
+constexpr const char* K_DG_TOK = "dg_tok";
+constexpr const char* K_DG_BATCH = "dg_batch";
+constexpr const char* K_DG_FLUSH = "dg_flush";
+constexpr const char* K_DG_CHG = "dg_chg";
+constexpr const char* K_DG_PRE = "dg_pre";
+constexpr const char* K_TR_EN = "tr_en";
+constexpr const char* K_TR_ID = "tr_id";
+constexpr const char* K_TR_BASE = "tr_base";
 
 SemaphoreHandle_t s_lock;
 Settings s_settings;
@@ -89,11 +103,42 @@ esp_err_t load() {
     read_str(h, K_TZ, s.timezone);
     uint8_t u8 = 0;
     if (nvs_get_u8(h, K_SIGREQ, &u8) == ESP_OK) s.require_signed_images = u8 != 0;
+    auto get_bool = [&](const char* k, bool& v) {
+        uint8_t b;
+        if (nvs_get_u8(h, k, &b) == ESP_OK) v = b != 0;
+    };
+    auto get_u32 = [&](const char* k, uint32_t& v) {
+        uint32_t x;
+        if (nvs_get_u32(h, k, &x) == ESP_OK) v = x;
+    };
+    get_bool(K_CAN_EN, s.can_enabled);
+    get_u32(K_CAN_BR, s.can_bitrate);
+    get_bool(K_DG_EN, s.diag_enabled);
+    read_str(h, K_DG_URL, s.diag_url);
+    get_u32(K_DG_BATCH, s.diag_batch);
+    get_u32(K_DG_FLUSH, s.diag_flush_s);
+    get_bool(K_DG_CHG, s.diag_change_only);
+    get_u32(K_DG_PRE, s.diag_pretrig_s);
+    get_bool(K_TR_EN, s.trig_enabled);
+    get_u32(K_TR_ID, s.trig_id);
+    read_str(h, K_TR_BASE, s.trig_baseline);
     // Fall back to defaults for anything that no longer validates.
     Settings d;
     if (!valid_hostname(s.hostname)) s.hostname = d.hostname;
     if (!valid_ntp_server(s.ntp_server)) s.ntp_server = d.ntp_server;
     if (!valid_timezone(s.timezone)) s.timezone = d.timezone;
+    std::string why;
+    if (!validate(s, why)) {
+        ESP_LOGW(TAG, "stored CAN/diagnostics settings invalid (%s), using defaults", why.c_str());
+        Settings fixed = s;
+        fixed.can_enabled = d.can_enabled; fixed.can_bitrate = d.can_bitrate;
+        fixed.diag_enabled = d.diag_enabled; fixed.diag_url = d.diag_url;
+        fixed.diag_batch = d.diag_batch; fixed.diag_flush_s = d.diag_flush_s;
+        fixed.diag_change_only = d.diag_change_only; fixed.diag_pretrig_s = d.diag_pretrig_s;
+        fixed.trig_enabled = d.trig_enabled; fixed.trig_id = d.trig_id;
+        fixed.trig_baseline = d.trig_baseline;
+        s = fixed;
+    }
     s_settings = s;
 
     uint8_t prov = 0;
@@ -136,6 +181,10 @@ esp_err_t init() {
     }
     if (err == ESP_OK) err = load();
     s_loaded = err == ESP_OK;
+    // Apply the timezone straight away so every log timestamp after this point
+    // (and after a soft reboot, where the clock keeps running) is local time.
+    setenv("TZ", s_settings.timezone.c_str(), 1);
+    tzset();
     if (!s_loaded) ESP_LOGE(TAG, "config load failed: %s", esp_err_to_name(err));
     else
         ESP_LOGI(TAG, "config loaded: host=%s ntp=%s tz=%s provisioned=%d",
@@ -152,6 +201,79 @@ bool is_provisioned() { return s_provisioned; }
 Settings get() {
     Lock l;
     return s_settings;
+}
+
+bool validate(const Settings& s, std::string& err) {
+    uint8_t tmp[8];
+    if (!valid_hostname(s.hostname)) err = "hostname: 1-32 letters, digits or '-'";
+    else if (!valid_ntp_server(s.ntp_server)) err = "invalid NTP server";
+    else if (!valid_timezone(s.timezone)) err = "invalid timezone string";
+    else if (!valid_can_bitrate(s.can_bitrate))
+        err = "CAN bitrate must be 125000, 250000 or 500000 (8 MHz crystal: 1 Mbit/s is impossible)";
+    else if (s.diag_url.size() > 200 ||
+             (!s.diag_url.empty() && s.diag_url.rfind("http://", 0) != 0 &&
+              s.diag_url.rfind("https://", 0) != 0))
+        err = "diagnostics URL must start with http:// or https:// (max 200 characters)";
+    else if (s.diag_enabled && s.diag_url.empty()) err = "set a server URL before enabling Verbose Diagnostics";
+    else if (s.diag_batch < 50 || s.diag_batch > 500) err = "batch size must be 50-500 frames";
+    else if (s.diag_flush_s < 5 || s.diag_flush_s > 600) err = "flush interval must be 5-600 s";
+    else if (s.diag_pretrig_s > 120) err = "pre-trigger must be 0-120 s";
+    else if (s.trig_id > 0x1FFFFFFF) err = "trigger ID must be at most 0x1FFFFFFF";
+    else if (parse_hex_bytes(s.trig_baseline, tmp) < 0)
+        err = "trigger baseline must be 0-8 bytes of hex, e.g. A8AA8202A8AA0202";
+    else return true;
+    return false;
+}
+
+esp_err_t save(const Settings& s, std::string& err) {
+    if (!validate(s, err)) return ESP_ERR_INVALID_ARG;
+    Lock l;
+    nvs_handle_t h;
+    esp_err_t e = nvs_open(kNs, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        err = esp_err_to_name(e);
+        return e;
+    }
+    auto ok = [&](esp_err_t r) { if (e == ESP_OK) e = r; };
+    ok(nvs_set_str(h, K_HOST, s.hostname.c_str()));
+    ok(nvs_set_str(h, K_NTP, s.ntp_server.c_str()));
+    ok(nvs_set_str(h, K_TZ, s.timezone.c_str()));
+    ok(nvs_set_u8(h, K_SIGREQ, s.require_signed_images));
+    ok(nvs_set_u8(h, K_CAN_EN, s.can_enabled));
+    ok(nvs_set_u32(h, K_CAN_BR, s.can_bitrate));
+    ok(nvs_set_u8(h, K_DG_EN, s.diag_enabled));
+    ok(nvs_set_str(h, K_DG_URL, s.diag_url.c_str()));
+    ok(nvs_set_u32(h, K_DG_BATCH, s.diag_batch));
+    ok(nvs_set_u32(h, K_DG_FLUSH, s.diag_flush_s));
+    ok(nvs_set_u8(h, K_DG_CHG, s.diag_change_only));
+    ok(nvs_set_u32(h, K_DG_PRE, s.diag_pretrig_s));
+    ok(nvs_set_u8(h, K_TR_EN, s.trig_enabled));
+    ok(nvs_set_u32(h, K_TR_ID, s.trig_id));
+    ok(nvs_set_str(h, K_TR_BASE, s.trig_baseline.c_str()));
+    ok(nvs_commit(h));
+    nvs_close(h);
+    if (e == ESP_OK) s_settings = s;
+    else err = std::string("saving failed: ") + esp_err_to_name(e);
+    return e;
+}
+
+std::string diag_token() {
+    Lock l;
+    nvs_handle_t h;
+    std::string v;
+    if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
+        read_str(h, K_DG_TOK, v);
+        nvs_close(h);
+    }
+    return v;
+}
+
+esp_err_t set_diag_token(const std::string& t) {
+    if (t.size() > 128) return ESP_ERR_INVALID_ARG;
+    for (char c : t)
+        if (!isprint((unsigned char)c)) return ESP_ERR_INVALID_ARG;
+    Lock l;
+    return write_strs({{K_DG_TOK, &t}});
 }
 
 esp_err_t set_hostname(const std::string& v) {
@@ -311,6 +433,25 @@ bool valid_timezone(const std::string& v) {
     for (char c : v)
         if (!isprint((unsigned char)c) || c == '"' || c == '\\') return false;
     return true;
+}
+
+bool valid_can_bitrate(uint32_t v) { return v == 125000 || v == 250000 || v == 500000; }
+
+int parse_hex_bytes(const std::string& hex, uint8_t out[8]) {
+    if (hex.size() % 2 || hex.size() > 16) return -1;
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int v = 0;
+        for (int k = 0; k < 2; k++) {
+            char c = hex[i + k];
+            int d = isdigit((unsigned char)c) ? c - '0'
+                    : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                    : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (d < 0) return -1;
+            v = v * 16 + d;
+        }
+        out[i / 2] = (uint8_t)v;
+    }
+    return (int)hex.size() / 2;
 }
 
 bool valid_ssid(const std::string& v) { return !v.empty() && v.size() <= 32; }
