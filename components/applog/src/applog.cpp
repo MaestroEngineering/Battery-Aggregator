@@ -103,4 +103,23 @@ std::string dump() {
     return out;
 }
 
+bool dump_to(bool (*sink)(void* ctx, const char* data, size_t len), void* ctx) {
+    char chunk[256];  // caller's stack; nothing on the heap
+    size_t pos = 0;
+    for (;;) {
+        size_t n = 0;
+        portENTER_CRITICAL(&s_mux);
+        size_t used = s_used;
+        size_t start = s_start;
+        while (pos + n < used && n < sizeof(chunk)) {
+            chunk[n] = s_ring[(start + pos + n) % kRingBytes];
+            n++;
+        }
+        portEXIT_CRITICAL(&s_mux);
+        if (n == 0) return true;
+        if (!sink(ctx, chunk, n)) return false;
+        pos += n;
+    }
+}
+
 }  // namespace applog

@@ -11,7 +11,7 @@
 #include "diag/batch_format.h"
 
 static void write_batch(const std::string& path, uint32_t seq, uint16_t flags, uint32_t dropped,
-                        int n, bool synced) {
+                        int n, bool synced, bool tx = false) {
     diag::BatchHeader h = {};
     const uint8_t mac[6] = {0x2c, 0xbc, 0xbb, 0x06, 0x73, 0x24};
     memcpy(h.mac, mac, 6);
@@ -36,7 +36,13 @@ static void write_batch(const std::string& path, uint32_t seq, uint16_t flags, u
         can::Record r = {};
         r.ts_us = 10'000'000ULL + i * 45'000ULL;
         r.port = 1;
-        if (i % 3 == 0) {  // 0x351 CVL 55.2 V, CCL 100 A, DCL 200 A, DVL 48 V
+        if (tx) {  // 0.1.7: frames the device transmitted on port INV, tagged kFlagTx
+            r.port = 0;
+            r.flags = can::kFlagTx;
+            r.id = 0x351; r.dlc = 8;
+            const uint8_t d[8] = {0x16, 0x02, 0xE8, 0x03, 0xE8, 0x03, 0xE0, 0x01};
+            memcpy(r.data, d, 8);
+        } else if (i % 3 == 0) {  // 0x351 CVL 55.2 V, CCL 100 A, DCL 200 A, DVL 48 V
             r.id = 0x351; r.dlc = 8;
             const uint8_t d[8] = {0x28, 0x02, 0xE8, 0x03, 0xD0, 0x07, 0xE0, 0x01};
             memcpy(r.data, d, 8);
@@ -58,5 +64,6 @@ int main(int argc, char** argv) {
     write_batch(d + "/b2.bin", 2, diag::kFlagChangeOnly, 37, 9, true);
     write_batch(d + "/ev.bin", 3, diag::kFlagEvent, 0, 6, true);
     write_batch(d + "/unsynced.bin", 4, 0, 0, 3, false);
+    write_batch(d + "/tx.bin", 5, 0, 0, 2, true, true);
     return 0;
 }

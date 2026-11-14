@@ -145,3 +145,14 @@ table.frames td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.frames tr.stale td { color: var(--muted); }
 .b { padding: 0 1px; border-radius: 3px; }
 .b.chg { background: var(--accent); color: var(--accent-text); }
+
+dialog {
+  max-width: 520px; width: calc(100% - 32px); padding: 20px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, .5); }
+dialog ul { padding-left: 18px; }
+
+.grid .card.wide { grid-column: 1 / -1; }
+table.frames.wrap td { white-space: normal; overflow-wrap: anywhere; }
+table.frames.wrap td:first-child { white-space: nowrap; color: var(--muted); }

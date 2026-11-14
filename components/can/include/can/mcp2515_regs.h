@@ -1,17 +1,29 @@
 #pragma once
-// MCP2515 registers, bit timing for an 8 MHz crystal, and the NO-TRANSMIT
-// guard. Pure C++ with no ESP-IDF dependencies so it is unit-tested on a PC
+// MCP2515 registers, bit timing for an 8 MHz crystal, and the SPI GUARD.
+// Pure C++ with no ESP-IDF dependencies so it is unit-tested on a PC
 // (tools/test_mcp2515.cpp).
 //
-// NO-TRANSMIT GUARANTEE (Phase 2 tap; SPEC.md "Sniffer mode ... never
-// transmits a frame of its own"). Every SPI transaction the driver sends is
-// checked by spi_command_allowed() first. It rejects:
+// SPI GUARD. Every SPI transaction the driver sends is checked first, by a
+// per-module Guard whose policy is fixed by the port (kPortPolicy, never a
+// setting). The baseline (all ports) rejects:
 //   - the LOAD TX BUFFER (0x40-0x45) and RTS (0x80-0x87) instructions,
 //   - any write or bit-modify of the TX buffer registers (0x30-0x3D,
 //     0x40-0x4D, 0x50-0x5D, which include TXREQ),
 //   - TXRTSCTRL values that would let the TXnRTS pins request a transmit,
-//   - CANCTRL modes other than configuration, listen-only and sleep. Normal
-//     mode would acknowledge frames (drive the ACK bit); loopback is refused too.
+//   - any bit-modify of CANCTRL or TXRTSCTRL (mode changes go through WRITE),
+//   - CANCTRL modes other than configuration, listen-only and sleep
+//     (loopback is refused on every port).
+// The ONLY exceptions (approved by the owner, 0.1.6):
+//   - Port A (Blue Nova): none. Listen-only, hardware-silent.
+//   - Port B (KNY): CANCTRL normal mode is allowed, so the controller
+//     acknowledges frames. LOAD TX and RTS stay refused, so B never sends a
+//     data frame (normal mode does drive ACK bits and error frames).
+//   - Port INV (inverter): normal mode ONLY with one-shot mode (OSM) set, so a
+//     failed frame is never retransmitted by the controller; LOAD TX only into
+//     a buffer from its start (0x40/0x42/0x44) with a complete standard frame
+//     whose ID and DLC are on kInvTxAllow (no RTR, no extended ID); RTS only
+//     for a single buffer loaded that way, at most once per ID per
+//     kInvTxMinIntervalMs. A buffer must be reloaded before every RTS.
 // Listen-only mode itself never drives the bus: no ACK, no error frames.
 #include <stddef.h>
 #include <stdint.h>
@@ -45,12 +57,21 @@ constexpr uint8_t RXB0CTRL = 0x60;
 constexpr uint8_t RXB1CTRL = 0x70;
 
 // CANCTRL / CANSTAT operating modes (REQOP / OPMOD, bits 7..5).
-constexpr uint8_t MODE_NORMAL = 0x00;      // FORBIDDEN here
+constexpr uint8_t MODE_NORMAL = 0x00;      // ports B (ACK only) and INV (with OSM) only
 constexpr uint8_t MODE_SLEEP = 0x20;
-constexpr uint8_t MODE_LOOPBACK = 0x40;    // FORBIDDEN here
+constexpr uint8_t MODE_LOOPBACK = 0x40;    // FORBIDDEN on every port
 constexpr uint8_t MODE_LISTEN_ONLY = 0x60;
 constexpr uint8_t MODE_CONFIG = 0x80;
 constexpr uint8_t MODE_MASK = 0xE0;
+constexpr uint8_t CANCTRL_ABAT = 0x10;     // abort all pending transmissions
+constexpr uint8_t CANCTRL_OSM = 0x08;      // one-shot mode: no automatic retransmission
+
+// TX buffers (port INV only).
+constexpr uint8_t TXB0CTRL = 0x30;
+constexpr uint8_t TXB_TXREQ = 0x08;
+constexpr uint8_t TXB_ABTF = 0x40, TXB_MLOA = 0x20, TXB_TXERR = 0x10;
+constexpr uint8_t INS_LOAD_TX0 = 0x40;     // LOAD TX BUFFER 0 from TXB0SIDH
+constexpr uint8_t INS_RTS0 = 0x81;         // request to send, TX buffer 0 only
 
 // CANINTF / CANINTE bits.
 constexpr uint8_t INT_RX0 = 0x01;
@@ -108,14 +129,53 @@ inline bool tx_register(uint8_t addr) {
            (addr >= 0x50 && addr <= 0x5D);
 }
 
-inline bool canctrl_value_allowed(uint8_t v) {
-    uint8_t mode = v & MODE_MASK;
-    return mode == MODE_CONFIG || mode == MODE_LISTEN_ONLY || mode == MODE_SLEEP;
+// Per-port policy. Fixed by the port index (BMS_CAN_PORT_INV 0, A 1, B 2 in can/pins.h).
+enum class Policy : uint8_t {
+    ListenOnly,  // port A: no normal mode, no transmit
+    AckOnly,     // port B: normal mode allowed (ACK), no LOAD TX / RTS
+    InverterTx   // port INV: normal mode with OSM, allow-listed frames, rate-limited
+};
+constexpr Policy kPortPolicy[3] = {Policy::InverterTx, Policy::ListenOnly, Policy::AckOnly};
+inline Policy policy_for_port(int port) {
+    return (port >= 0 && port < 3) ? kPortPolicy[port] : Policy::ListenOnly;
 }
 
-// The single gate for every SPI transaction. `buf` is the full byte sequence
-// clocked out (instruction, address, data...).
-inline bool spi_command_allowed(const uint8_t* buf, size_t len) {
+// Port INV transmit allow-list: standard 11-bit IDs, data frames, fixed DLC.
+struct TxAllow {
+    uint16_t id;
+    uint8_t dlc;
+};
+constexpr TxAllow kInvTxAllow[] = {
+    {0x351, 8},  // CVL, CCL, DCL, DVL
+    {0x355, 4},  // SOC, SOH
+    {0x356, 6},  // voltage, current, temperature
+    {0x359, 7},  // protection / alarm flags
+    {0x35C, 2},  // charge / discharge request flags
+    {0x35E, 8},  // manufacturer name
+};
+constexpr int kInvTxAllowCount = sizeof(kInvTxAllow) / sizeof(kInvTxAllow[0]);
+constexpr uint32_t kInvTxMinIntervalMs = 1000;  // at most 1 Hz per ID
+inline int tx_allow_index(uint16_t id, uint8_t dlc) {
+    for (int i = 0; i < kInvTxAllowCount; i++)
+        if (kInvTxAllow[i].id == id && kInvTxAllow[i].dlc == dlc) return i;
+    return -1;
+}
+
+inline bool canctrl_value_allowed(Policy p, uint8_t v) {
+    uint8_t mode = v & MODE_MASK;
+    if (mode == MODE_CONFIG || mode == MODE_LISTEN_ONLY || mode == MODE_SLEEP) return true;
+    if (mode == MODE_NORMAL) {
+        if (p == Policy::AckOnly) return true;
+        if (p == Policy::InverterTx) return (v & CANCTRL_OSM) != 0;  // never automatic retransmission
+    }
+    return false;  // loopback and 0xE0, and normal mode on port A
+}
+inline bool canctrl_value_allowed(uint8_t v) { return canctrl_value_allowed(Policy::ListenOnly, v); }
+
+// The stateless part of the gate: every instruction except LOAD TX and RTS
+// (which are refused here and only handled by Guard on port INV). `buf` is the
+// full byte sequence clocked out (instruction, address, data...).
+inline bool spi_command_allowed(Policy p, const uint8_t* buf, size_t len) {
     if (len == 0) return false;
     uint8_t ins = buf[0];
     switch (ins) {
@@ -135,7 +195,7 @@ inline bool spi_command_allowed(const uint8_t* buf, size_t len) {
                 uint8_t addr = (uint8_t)(buf[1] + (i - 2));
                 uint8_t v = buf[i];
                 if (tx_register(addr)) return false;
-                if (addr == CANCTRL && !canctrl_value_allowed(v)) return false;
+                if (addr == CANCTRL && !canctrl_value_allowed(p, v)) return false;
                 if (addr == TXRTSCTRL && (v & 0x07) != 0) return false;  // TXnRTS pins may not trigger TX
             }
             return true;
@@ -150,5 +210,70 @@ inline bool spi_command_allowed(const uint8_t* buf, size_t len) {
             return false;  // includes LOAD TX BUFFER (0x40-0x45) and RTS (0x80-0x87)
     }
 }
+// Port A's rules (the listen-only baseline).
+inline bool spi_command_allowed(const uint8_t* buf, size_t len) {
+    return spi_command_allowed(Policy::ListenOnly, buf, len);
+}
+
+// The single gate for every SPI transaction of one module. Stateful only for
+// port INV: it remembers which allow-listed frame each TX buffer holds and when
+// each ID was last requested, so the rate limit holds whatever the caller does.
+class Guard {
+public:
+    explicit Guard(Policy p = Policy::ListenOnly) : policy_(p) { clear_buffers(); }
+    Policy policy() const { return policy_; }
+    // `now_ms` is a monotonic clock (only used on port INV).
+    bool check(const uint8_t* buf, size_t len, uint64_t now_ms) {
+        if (len == 0) return false;
+        const uint8_t ins = buf[0];
+        if (ins >= 0x40 && ins <= 0x45) return load_tx(buf, len);
+        if (ins >= 0x80 && ins <= 0x87) return rts(ins, len, now_ms);
+        if (!spi_command_allowed(policy_, buf, len)) return false;
+        if (ins == INS_RESET) clear_buffers();  // reset clears the TX buffers
+        return true;
+    }
+
+private:
+    bool load_tx(const uint8_t* b, size_t len) {
+        if (policy_ != Policy::InverterTx) return false;
+        const uint8_t ins = b[0];
+        if (ins & 0x01) return false;  // 0x41/0x43/0x45 start at the data bytes: refused
+        const int n = (ins >> 1) & 0x03;  // 0x40 -> 0, 0x42 -> 1, 0x44 -> 2
+        if (len < 6) return false;
+        const uint8_t sidh = b[1], sidl = b[2], eid8 = b[3], eid0 = b[4], dlcr = b[5];
+        if (sidl & 0x1F) return false;   // EXIDE (bit 3), EID17:16 and unused bits must be 0
+        if (eid8 || eid0) return false;
+        if (dlcr & 0xF0) return false;   // RTR (bit 6) and unused bits must be 0
+        const uint16_t id = (uint16_t)(((uint16_t)sidh << 3) | (sidl >> 5));
+        const uint8_t dlc = dlcr & 0x0F;
+        const int idx = tx_allow_index(id, dlc);
+        if (idx < 0) return false;
+        if (len != (size_t)(6 + dlc)) return false;  // the complete frame, nothing more
+        loaded_[n] = (int8_t)idx;
+        return true;
+    }
+    bool rts(uint8_t ins, size_t len, uint64_t now_ms) {
+        if (policy_ != Policy::InverterTx || len != 1) return false;
+        int n;
+        if (ins == 0x81) n = 0;
+        else if (ins == 0x82) n = 1;
+        else if (ins == 0x84) n = 2;
+        else return false;  // 0x80 (none) and multi-buffer requests are refused
+        const int idx = loaded_[n];
+        if (idx < 0) return false;  // not loaded with an allow-listed frame (or already sent)
+        if (sent_[idx] && now_ms - last_ms_[idx] < kInvTxMinIntervalMs) return false;
+        sent_[idx] = true;
+        last_ms_[idx] = now_ms;
+        loaded_[n] = -1;  // one RTS per load
+        return true;
+    }
+    void clear_buffers() {
+        for (auto& l : loaded_) l = -1;
+    }
+    Policy policy_;
+    int8_t loaded_[3];
+    bool sent_[kInvTxAllowCount] = {};
+    uint64_t last_ms_[kInvTxAllowCount] = {};
+};
 
 }  // namespace mcp2515

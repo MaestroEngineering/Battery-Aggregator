@@ -4,4 +4,4 @@ idf_component_register(SRCS "src/mcp2515.cpp" "src/tap.cpp"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "src"
                        REQUIRES esp_common
-                       PRIV_REQUIRES esp_driver_spi esp_driver_gpio esp_timer esp_system freertos config)
+                       PRIV_REQUIRES esp_driver_spi esp_driver_gpio esp_timer esp_system esp_rom freertos config)

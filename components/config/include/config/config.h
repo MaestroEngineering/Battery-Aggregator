@@ -31,6 +31,42 @@ struct Settings {
     // post-OTA self-test would otherwise fail ("CAN controllers initialised").
     bool can_enabled = false;
     uint32_t can_bitrate = 250000;  // 125000 | 250000 | 500000 (8 MHz crystal)
+    // Ports INV and B. Bitrates and modes are applied on change, without a reboot.
+    bool can_inv_enabled = false;
+    uint32_t can_inv_bitrate = 250000;  // inverter side (Sunsynk)
+    bool can_b_enabled = false;
+    uint32_t can_b_bitrate = 500000;    // KNY-P51300
+    bool can_b_ack = false;             // B in normal mode: acknowledge the KNY (never sends data frames)
+
+    // Aggregator (source A = Blue Nova on port A, source B = KNY on port B).
+    bool agg_src_a = false, agg_src_b = false;
+    uint32_t agg_kny_cap_ah = 300;      // the KNY sends no capacity frame
+    uint32_t agg_fs_cvl_dv = 0;         // fail-safe CVL in 0.1 V; 0 = not set (output refused)
+    uint32_t agg_fs_dvl_dv = 0;         // fail-safe DVL in 0.1 V; 0 = not set
+    uint32_t agg_ccl_max = 0;           // A, clamp on the summed CCL; 0 = not set (output refused)
+    uint32_t agg_dcl_max = 0;           // A, same for DCL
+    bool agg_silent = false;            // fail-safe action: false = fail-safe values, true = silent
+    uint32_t agg_hold_s = 10;           // start-up / recovery hold (5-300 s)
+    uint32_t agg_cvl_hold_s = 60;       // CVL rise hold (0-600 s)
+    // Per-source user caps (A, both directions; 1-1000): cap each source's contribution and set the
+    // over-current guard limit = min(own reported limit, cap).
+    uint32_t agg_cap_a = 100;           // Blue Nova bank
+    uint32_t agg_cap_a_p2 = 100;        // Blue Nova pack 2
+    uint32_t agg_cap_b = 100;           // KNY
+    // Inverter transmit on port INV. Off by default. NOT part of the settings sections or
+    // exports/imports: it is set only through POST /api/agg/transmit with the typed
+    // confirmation, and cleared whenever port INV is disabled or its bitrate changes.
+    bool agg_tx_enabled = false;
+
+    // MQTT / Home Assistant. The password is a secret (NVS only, never exported).
+    bool mqtt_enabled = false;
+    std::string mqtt_host;              // broker host name or IP
+    uint32_t mqtt_port = 1883;
+    std::string mqtt_user;
+    std::string mqtt_base = "bms-agg";  // base topic
+    bool mqtt_discovery = true;         // Home Assistant discovery
+    uint32_t mqtt_interval_s = 10;      // publish interval (2-3600 s)
+    bool mqtt_retain = false;           // retain state topics
 
     // Verbose Diagnostics (SPEC.md): upload CAN traffic to a server you run.
     bool diag_enabled = false;
@@ -61,6 +97,8 @@ bool validate(const Settings& s, std::string& err);
 // Upload token for Verbose Diagnostics: a secret, never exported.
 std::string diag_token();
 esp_err_t set_diag_token(const std::string& t);
+std::string mqtt_password();
+esp_err_t set_mqtt_password(const std::string& p);
 esp_err_t set_hostname(const std::string& v);
 esp_err_t set_ntp(const std::string& server, const std::string& tz);
 esp_err_t set_require_signed_images(bool v);
@@ -86,7 +124,9 @@ bool valid_ntp_server(const std::string& v);
 bool valid_timezone(const std::string& v);
 bool valid_ssid(const std::string& v);
 bool valid_wifi_password(const std::string& v);  // "" (open) or 8..63
-bool valid_can_bitrate(uint32_t v);
+bool valid_can_bitrate(uint32_t v);  // 125k/250k/500k: an 8 MHz MCP2515 cannot do 1 Mbit/s
+bool valid_mqtt_host(const std::string& v);
+bool valid_mqtt_base(const std::string& v);
 // Parses up to 8 bytes of hex ("A8AA..."); returns byte count or -1.
 int parse_hex_bytes(const std::string& hex, uint8_t out[8]);
 

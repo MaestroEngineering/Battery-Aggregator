@@ -2,5 +2,5 @@
 idf_component_register(SRCS "src/diag.cpp"
                        INCLUDE_DIRS "include"
                        REQUIRES can
-                       PRIV_REQUIRES config net esp_http_client esp_timer esp_hw_support esp_app_format
+                       PRIV_REQUIRES heapmon config net esp_http_client esp_timer esp_hw_support esp_app_format
                                      mbedtls freertos)

@@ -1,0 +1,3 @@
+dependencies:
+  idf: ">=5.3"
+  espressif/mqtt: "^1.0.0"

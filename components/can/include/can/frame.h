@@ -8,6 +8,7 @@ constexpr uint32_t kIdRtr = 0x40000000u;
 constexpr uint32_t kIdMask = 0x1FFFFFFFu;
 
 constexpr uint8_t kFlagSnapshot = 0x01;  // re-sent unchanged frame (change-only snapshot)
+constexpr uint8_t kFlagTx = 0x02;        // a frame this device transmitted (port INV), not received
 
 // One received frame. 24 bytes; the same layout is used in the web capture
 // stream and in Verbose Diagnostics batches (little-endian on the wire).

@@ -1,0 +1,3 @@
+Minimal host stand-ins for the ESP-IDF headers that components/agg/src/glue.cpp and
+components/webserver/src/agg_status_json.cpp include, so they compile on a PC for
+tools/test_output_independent.cpp and tools/test_status_json.cpp. Not used by the firmware.

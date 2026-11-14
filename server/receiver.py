@@ -38,6 +38,7 @@ RECORD = struct.Struct("<QIBBBB8s")             # 24 bytes
 assert HEADER.size == 64 and RECORD.size == 24
 
 F_SYNCED, F_CHANGE_ONLY, F_EVENT, F_TRUNCATED = 1, 2, 4, 8
+R_SNAPSHOT, R_TX = 0x01, 0x02  # per-frame flags (can::Record.flags): change-only snapshot, transmitted by the device
 ID_EXT, ID_RTR, ID_MASK = 0x80000000, 0x40000000, 0x1FFFFFFF
 
 SCHEMA = """
@@ -138,7 +139,7 @@ def fmt_id(cid, ext):
 
 def export_rows(q):
     sql = ("SELECT f.ts_us, f.unix_us, f.can_id, f.ext, f.rtr, f.dlc, f.data, b.device, b.boot_id, "
-           "b.seq, b.flags FROM frames f JOIN batches b ON b.id = f.batch_id WHERE 1=1")
+           "b.seq, b.flags, f.port, f.flags FROM frames f JOIN batches b ON b.id = f.batch_id WHERE 1=1")
     args = []
     kind = q.get("kind", ["periodic"])[0]
     if kind == "periodic":
@@ -165,17 +166,19 @@ def export_rows(q):
 def export_text(rows, fmt):
     out = []
     if fmt == "csv":
-        out.append("unix_time,unix_us,ts_us,device,boot_id,seq,kind,id,ext,rtr,dlc,data")
-        for ts, ux, cid, ext, rtr, dlc, data, dev, boot, seq, flags in rows:
+        out.append("unix_time,unix_us,ts_us,device,boot_id,seq,kind,port,dir,id,ext,rtr,dlc,data")
+        for ts, ux, cid, ext, rtr, dlc, data, dev, boot, seq, flags, port, fflags in rows:
             iso = (datetime.datetime.fromtimestamp(ux / 1e6, datetime.timezone.utc).isoformat()
                    if ux else "")
             out.append(f"{iso},{ux or ''},{ts},{dev},{boot},{seq},{'event' if flags & F_EVENT else 'periodic'},"
+                       f"{port},{'tx' if fflags & R_TX else 'rx'},"
                        f"0x{fmt_id(cid, ext)},{ext},{rtr},{dlc},{data.hex().upper()}")
     elif fmt == "candump":
-        for ts, ux, cid, ext, rtr, dlc, data, *_ in rows:
+        for ts, ux, cid, ext, rtr, dlc, data, *rest in rows:
             t = (ux if ux else ts) / 1e6
             payload = "R" if rtr else data.hex().upper()
-            out.append(f"({t:.6f}) can0 {fmt_id(cid, ext)}#{payload}")
+            # channel per port (can0 INV, can1 A, can2 B); frames the device transmitted: can0tx
+            out.append(f"({t:.6f}) can{rest[4]}{'tx' if rest[5] & R_TX else ''} {fmt_id(cid, ext)}#{payload}")
     elif fmt == "asc":
         # One time base per file: wall-clock if any frame has it, else time since boot.
         wall = any(r[1] for r in rows)
@@ -190,11 +193,12 @@ def export_text(rows, fmt):
         if skipped:
             out.append(f"// {skipped} frames without wall-clock time omitted")
         out.append(f"Begin Triggerblock {stamp}")
-        for ts, ux, cid, ext, rtr, dlc, data, *_ in rows:
+        for ts, ux, cid, ext, rtr, dlc, data, *rest in rows:
             t = ((ux if wall else ts) - start_us) / 1e6
             ident = (f"{cid:X}x" if ext else f"{cid:X}").ljust(15)
             body = "r" if rtr else f"d {dlc} " + " ".join(f"{b:02X}" for b in data)
-            out.append(f"{t:11.6f} 1  {ident} Rx   {body}")
+            # channel = port + 1 (1 INV, 2 A, 3 B); Tx for frames the device transmitted
+            out.append(f"{t:11.6f} {rest[4] + 1}  {ident} {'Tx' if rest[5] & R_TX else 'Rx'}   {body}")
         out.append("End TriggerBlock")
     else:
         raise BadBatch("format must be csv, candump or asc")

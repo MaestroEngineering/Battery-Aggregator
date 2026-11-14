@@ -75,3 +75,4 @@ sdkconfig.bms-agg-selftest-fail
 sdkconfig.old
 components/webserver/generated/
 release/
+__pycache__/

@@ -1,5 +1,6 @@
 #pragma once
 // Pin map for the three MCP2515 CAN modules on a classic ESP32 (esp32dev).
+// INT lines changed 2026-11-05 to match the wiring: INV 36, A 34, B 35.
 // Approved 2026-11-01. See SPEC.md "Hardware platform".
 //
 //  - One shared SPI bus (VSPI on its native IO_MUX pins), one CS per module.
@@ -19,15 +20,15 @@
 
 // Port INV -> inverter (MCP2515 #1). Not used yet (Phase 3).
 #define BMS_CAN_INV_CS    25
-#define BMS_CAN_INV_INT   34
+#define BMS_CAN_INV_INT   36
 
 // Port A -> battery A (MCP2515 #2). Phase 2: the listen-only tap.
 #define BMS_CAN_A_CS      26
-#define BMS_CAN_A_INT     35
+#define BMS_CAN_A_INT     34
 
 // Port B -> battery B (MCP2515 #3). Not used yet (Phase 3).
 #define BMS_CAN_B_CS      27
-#define BMS_CAN_B_INT     36
+#define BMS_CAN_B_INT     35
 
 // MCP2515 module crystal. With 8 MHz the fastest possible bitrate is 500 kbit/s.
 #define BMS_CAN_MCP2515_XTAL_HZ 8000000

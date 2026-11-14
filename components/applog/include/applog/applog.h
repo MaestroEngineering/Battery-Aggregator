@@ -14,4 +14,7 @@ void init();
 // Copy the buffered lines, oldest first, one per '\n'.
 std::string dump();
 
+// Same, streamed in 256-byte pieces to `sink` (no heap). False if the sink failed.
+bool dump_to(bool (*sink)(void* ctx, const char* data, size_t len), void* ctx);
+
 }  // namespace applog

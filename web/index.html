@@ -13,6 +13,7 @@
     <span class="brand">BMS Aggregator</span>
     <nav id="nav" class="hidden">
       <a href="#dashboard" data-view="dashboard">Dashboard</a>
+      <a href="#agg" data-view="agg">Aggregator</a>
       <a href="#can" data-view="can">CAN</a>
       <a href="#system" data-view="system">System</a>
       <a href="#firmware" data-view="firmware">Firmware</a>
@@ -76,6 +77,101 @@
     </div>
   </section>
 
+  <!-- Aggregator -->
+  <section id="v-agg" class="hidden">
+    <h1>Aggregator</h1>
+    <div id="a-banner" class="msg warn hidden"></div>
+    <div class="grid">
+      <div class="card">
+        <h2>Output to the inverter</h2>
+        <dl class="kv">
+          <dt>State</dt><dd id="a-state">-</dd>
+          <dt>Reason</dt><dd id="a-reason">-</dd>
+          <dt>Transmit</dt><dd id="a-tx" class="warn">-</dd>
+          <dt>CVL</dt><dd id="a-cvl">-</dd>
+          <dt>CCL</dt><dd id="a-ccl">-</dd>
+          <dt>DCL</dt><dd id="a-dcl">-</dd>
+          <dt>DVL</dt><dd id="a-dvl">-</dd>
+          <dt>SOC / SOH</dt><dd id="a-soc">-</dd>
+          <dt>Voltage</dt><dd id="a-v">-</dd>
+          <dt>Current</dt><dd id="a-i">-</dd>
+          <dt>Temperature</dt><dd id="a-t">-</dd>
+          <dt>Capacity</dt><dd id="a-cap">-</dd>
+          <dt>Energy</dt><dd id="a-e">-</dd>
+          <dt>Alarm bits</dt><dd id="a-alarm">-</dd>
+        </dl>
+        <h3>Frames (sent on port INV only while transmit is on)</h3>
+        <pre id="a-frames">-</pre>
+      </div>
+      <div class="card wide">
+        <h2>Sources</h2>
+        <div class="tablewrap"><table class="frames wrap" id="a-src"><thead><tr><th></th><th>A: Blue Nova (bank)</th><th>A: pack 1</th><th>A: pack 2</th><th>B: KNY</th></tr></thead><tbody></tbody></table></div>
+        <h3>Over-current guard</h3>
+        <p class="hint">Per source and direction: limit = min(own reported limit, user cap). Over 105 % for 3 s: that direction at 50 % (held ≥ 30 s, released after 30 s under 90 %). Still over 15 s later, or over 120 %: 0 for the recovery hold.</p>
+        <div class="tablewrap"><table class="frames wrap" id="a-guard"><thead><tr><th>Source</th><th>Current</th><th>Charge (limit)</th><th>Discharge (limit)</th></tr></thead><tbody></tbody></table></div>
+        <div class="actions"><button id="a-clear" type="button">Clear latched trips…</button></div>
+        <div class="msg hidden" id="a-clear-msg"></div>
+      </div>
+      <div class="card">
+        <h2>Events</h2>
+        <div style="overflow-x:auto;max-height:420px;overflow-y:auto"><table class="frames" id="a-ev"><thead><tr><th>When</th><th>Src</th><th>Type</th><th>Event</th></tr></thead><tbody></tbody></table></div>
+        <p class="hint" id="a-mqtt">MQTT: -</p>
+      </div>
+      <form id="f-agg" class="card">
+        <h2>Settings</h2>
+        <label class="check"><input id="g-a" type="checkbox"> Source A: Blue Nova on port A (needs the tap enabled)</label>
+        <label class="check"><input id="g-b" type="checkbox"> Source B: KNY on port B (needs port B enabled)</label>
+        <label for="g-kcap">KNY capacity (Ah, the KNY sends none)</label>
+        <input id="g-kcap" type="number" min="1" max="2000" step="1">
+        <label for="g-fcvl">Fail-safe CVL (V) <span class="hint">no factory default: the output is refused until set</span></label>
+        <input id="g-fcvl" type="number" min="0" max="60" step="0.1">
+        <label for="g-fdvl">Fail-safe DVL (V)</label>
+        <input id="g-fdvl" type="number" min="0" max="60" step="0.1">
+        <label for="g-cclmx">CCL maximum (A, clamp on the sum; inverter/cable limit)</label>
+        <input id="g-cclmx" type="number" min="0" max="1000" step="1">
+        <label for="g-dclmx">DCL maximum (A)</label>
+        <input id="g-dclmx" type="number" min="0" max="1000" step="1">
+        <label for="g-act">Fail-safe action (stale, tripped, not yet seen)</label>
+        <select id="g-act"><option value="values">Fail-safe values: keep talking, CCL = DCL = 0 (default)</option><option value="silent">Silent: send nothing</option></select>
+        <label for="g-hold">Start-up / recovery hold (s, 5-300)</label>
+        <input id="g-hold" type="number" min="5" max="300" step="1">
+        <label for="g-cvlh">CVL rise hold (s, 0-600; falls pass at once)</label>
+        <input id="g-cvlh" type="number" min="0" max="600" step="1">
+        <label for="g-capa">Cap: Blue Nova bank (A, 1-1000)</label>
+        <input id="g-capa" type="number" min="1" max="1000" step="1">
+        <label for="g-capp2">Cap: Blue Nova pack 2 (A)</label>
+        <input id="g-capp2" type="number" min="1" max="1000" step="1">
+        <label for="g-capb">Cap: KNY (A)</label>
+        <input id="g-capb" type="number" min="1" max="1000" step="1">
+        <p class="hint">Each cap limits that source's share of the summed CCL/DCL and sets its over-current guard limit (with the battery's own limit, whichever is lower).</p>
+        <p class="hint">Always on, not settable: frame timeouts 5 s (1 Hz frames) and 6 s (Blue Nova pack 2), the alarm trip, plausibility checks, the start-up hold, the over-current guard, the watchdog and silence during OTA. In fail-safe, CVL never goes below and DVL never above the last good pack voltage.</p>
+        <div class="actions"><button class="primary" type="submit">Save</button></div>
+        <div class="msg hidden"></div>
+      </form>
+      <div class="card">
+        <h2>Inverter transmit (port INV)</h2>
+        <label class="check"><input id="g-tx" type="checkbox"> Transmit the output to the inverter</label>
+        <p class="hint">Off by default. Turning it on asks for a typed confirmation. Port INV then runs in normal, one-shot mode and sends only 0x351, 0x355, 0x356, 0x359, 0x35C and 0x35E (fixed lengths), at most once a second each. The start-up hold (CCL = DCL = 0) applies until every enabled source has been valid for the hold time. Disabling port INV or changing its bitrate turns transmit off. Port A never transmits.</p>
+        <dl class="kv" style="margin-top:10px"><dt>Port INV</dt><dd id="a-tx-port">-</dd><dt>Frames sent / failed</dt><dd id="a-tx-cnt">-</dd></dl>
+        <div id="a-tx-msg" class="msg hidden"></div>
+      </div>
+      <dialog id="tx-dlg">
+        <form method="dialog">
+          <h2>Transmit to the inverter?</h2>
+          <p>The gateway will start talking to the inverter on port INV as the battery. The inverter will charge and discharge using the limits shown on this page.</p>
+          <ul class="hint">
+            <li>Check the fail-safe CVL/DVL and the CCL/DCL maximums first: they are what the inverter gets whenever a source is missing.</li>
+            <li>Only one device may act as the battery on that bus: disconnect the battery's own link to the inverter.</li>
+            <li>Port A stays listen-only; port B never sends data frames.</li>
+          </ul>
+          <label for="tx-confirm">Type TRANSMIT to confirm</label>
+          <input id="tx-confirm" type="text" autocomplete="off" spellcheck="false">
+          <div class="actions"><button value="cancel" type="submit">Cancel</button><button id="tx-ok" class="primary" value="ok" type="submit" disabled>Enable transmit</button></div>
+        </form>
+      </dialog>
+    </div>
+  </section>
+
   <!-- CAN tap -->
   <section id="v-can" class="hidden">
     <h1>CAN tap</h1>
@@ -97,8 +193,33 @@
           <dt>RAM buffer</dt><dd id="c-ring">-</dd>
         </dl>
       </div>
+      <div class="card">
+        <h2>Modules</h2>
+        <p class="hint">Checks all three MCP2515 modules: SPI answers, register read-back, CS isolation, the INT line, and a 1 s listen-only receive at the bitrate below. Nothing is transmitted. The tap pauses for about 4 s.</p>
+        <dl class="kv" id="probe-list"><dt>Result</dt><dd>not run yet</dd></dl>
+        <div class="actions"><button id="can-probe" type="button">Check modules</button></div>
+        <div class="msg hidden" id="probe-msg"></div>
+        <h3>Map INT pins (bench only)</h3>
+        <p class="hint">Finds which GPIO each module's INT line is really wired to. Each module in turn listens alone (listen-only, all IDs) until a test frame with an ID in 0x100–0x1FF arrives, then every candidate GPIO is sampled; this repeats 5 times. Nothing is transmitted by the device. <b>Bench only:</b> the frames must come from <code>tools/bench_can_check.py --bench --tests 4</code> on a bus with no battery or inverter (the script starts the mapping itself, or keeps sending while this button's run is going). pins.h is never changed. Up to about 20 s per module; the tap pauses meanwhile. Serial console: <code>intmap</code>.</p>
+        <div id="intmap-out"><p class="hint">not run yet</p></div>
+        <div class="actions"><button id="can-intmap" type="button">Map INT pins</button></div>
+        <div class="msg hidden" id="intmap-msg"></div>
+      </div>
+      <form id="f-ports" class="card">
+        <h2>Ports</h2>
+        <p class="hint">Each port has its own bitrate, applied at once (no reboot). Port A is always listen-only. Port INV is listen-only unless inverter transmit is turned on (Aggregator page). Port B is listen-only unless <i>Acknowledge on B</i> is ticked: then it acknowledges the KNY's frames (needed when nothing else on that bus does) but never sends a data frame; if it causes bus errors (wrong bitrate) it drops back to listen-only by itself. 1 Mbit/s is not possible with the 8 MHz crystal.</p>
+        <table class="frames"><thead><tr><th>Port</th><th>Use</th><th>Enabled</th><th>Bitrate</th><th>State</th><th>Rate</th><th>Last frame</th><th>Errors</th></tr></thead>
+          <tbody>
+            <tr><td>INV</td><td>Sunsynk inverters</td><td><input id="p-inv-en" type="checkbox"></td><td><select id="p-inv-br"><option value="125000">125k</option><option value="250000">250k</option><option value="500000">500k</option><option value="1000000" disabled>1M (impossible)</option></select></td><td id="p-inv-st">-</td><td id="p-inv-fps">-</td><td id="p-inv-age">-</td><td id="p-inv-err">-</td></tr>
+            <tr><td>A</td><td>Blue Nova (tap)</td><td>see Settings</td><td id="p-a-br">-</td><td id="p-a-st">-</td><td id="p-a-fps">-</td><td id="p-a-age">-</td><td id="p-a-err">-</td></tr>
+            <tr><td>B</td><td>KNY-P51300</td><td><input id="p-b-en" type="checkbox"></td><td><select id="p-b-br"><option value="125000">125k</option><option value="250000">250k</option><option value="500000">500k</option><option value="1000000" disabled>1M (impossible)</option></select></td><td id="p-b-st">-</td><td id="p-b-fps">-</td><td id="p-b-age">-</td><td id="p-b-err">-</td></tr>
+          </tbody></table>
+        <label class="check"><input id="p-b-ack" type="checkbox"> Acknowledge on B (normal mode, no data frames)</label>
+        <div class="actions"><button class="primary" type="submit">Save ports</button></div>
+        <div class="msg hidden"></div>
+      </form>
       <form id="f-can" class="card">
-        <h2>Settings</h2>
+        <h2>Settings (port A, the tap)</h2>
         <label class="check"><input id="can-en" type="checkbox"> Enable the tap</label>
         <p class="hint">While enabled, a missing or faulty MCP2515 makes a new firmware fail its self-test (and roll back).</p>
         <label for="can-br">Bitrate</label>
@@ -150,7 +271,7 @@
       </div>
       <div class="tablewrap">
         <table id="tbl" class="frames">
-          <thead><tr><th>ID</th><th>Count</th><th>Period</th><th>Age</th><th>DLC</th><th>Data</th><th>Min</th><th>Max</th></tr></thead>
+          <thead><tr><th>Port</th><th>ID</th><th>Count</th><th>Period</th><th>Age</th><th>DLC</th><th>Data</th><th>Min</th><th>Max</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -205,6 +326,28 @@
         <label for="tz">Timezone (POSIX TZ string)</label>
         <input id="tz" type="text" maxlength="64" required>
         <p class="hint">Examples: <code>SAST-2</code> (South Africa), <code>UTC0</code>, <code>CET-1CEST,M3.5.0,M10.5.0/3</code></p>
+        <div class="actions"><button class="primary" type="submit">Save</button></div>
+        <div class="msg hidden"></div>
+      </form>
+
+      <form id="f-mqtt" class="card">
+        <h2>MQTT / Home Assistant</h2>
+        <p class="hint">Publishes the aggregator state (read-only: nothing can be changed over MQTT). Plain MQTT (no TLS in this build). Energy counters use <code>state_class: total</code>.</p>
+        <label class="check"><input id="mq-en" type="checkbox"> Enable MQTT</label>
+        <label for="mq-host">Broker host</label>
+        <input id="mq-host" type="text" maxlength="64" placeholder="192.168.0.7">
+        <label for="mq-port">Port</label>
+        <input id="mq-port" type="number" min="1" max="65535">
+        <label for="mq-user">User (optional)</label>
+        <input id="mq-user" type="text" maxlength="64" autocomplete="off">
+        <label for="mq-pass">Password <span class="hint" id="mq-pass-state"></span></label>
+        <input id="mq-pass" type="password" maxlength="128" autocomplete="new-password" placeholder="unchanged">
+        <label for="mq-base">Base topic</label>
+        <input id="mq-base" type="text" maxlength="48">
+        <label for="mq-int">Publish interval (s)</label>
+        <input id="mq-int" type="number" min="2" max="3600">
+        <label class="check"><input id="mq-disc" type="checkbox"> Home Assistant discovery</label>
+        <label class="check"><input id="mq-ret" type="checkbox"> Retain state topics</label>
         <div class="actions"><button class="primary" type="submit">Save</button></div>
         <div class="msg hidden"></div>
       </form>
@@ -304,5 +447,6 @@
 </main>
 <script src="/app.js"></script>
 <script src="/can.js"></script>
+<script src="/agg.js"></script>
 </body>
 </html>

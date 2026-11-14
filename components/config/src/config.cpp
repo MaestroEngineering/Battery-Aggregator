@@ -45,6 +45,34 @@ constexpr const char* K_DG_PRE = "dg_pre";
 constexpr const char* K_TR_EN = "tr_en";
 constexpr const char* K_TR_ID = "tr_id";
 constexpr const char* K_TR_BASE = "tr_base";
+constexpr const char* K_INV_EN = "inv_en";
+constexpr const char* K_INV_BR = "inv_br";
+constexpr const char* K_B_EN = "b_en";
+constexpr const char* K_B_BR = "b_br";
+constexpr const char* K_B_ACK = "b_ack";
+constexpr const char* K_AG_TX = "ag_tx";
+constexpr const char* K_AG_A = "ag_a";
+constexpr const char* K_AG_B = "ag_b";
+constexpr const char* K_AG_KCAP = "ag_kcap";
+constexpr const char* K_AG_FCVL = "ag_fcvl";
+constexpr const char* K_AG_FDVL = "ag_fdvl";
+constexpr const char* K_AG_CCLMX = "ag_cclmx";
+constexpr const char* K_AG_DCLMX = "ag_dclmx";
+constexpr const char* K_AG_SIL = "ag_sil";
+constexpr const char* K_AG_HOLD = "ag_hold";
+constexpr const char* K_AG_CVLH = "ag_cvlh";
+constexpr const char* K_AG_CAPA = "ag_capa";
+constexpr const char* K_AG_CAPP2 = "ag_capp2";
+constexpr const char* K_AG_CAPB = "ag_capb";
+constexpr const char* K_MQ_EN = "mq_en";
+constexpr const char* K_MQ_HOST = "mq_host";
+constexpr const char* K_MQ_PORT = "mq_port";
+constexpr const char* K_MQ_USER = "mq_user";
+constexpr const char* K_MQ_PASS = "mq_pass";
+constexpr const char* K_MQ_BASE = "mq_base";
+constexpr const char* K_MQ_DISC = "mq_disc";
+constexpr const char* K_MQ_INT = "mq_int";
+constexpr const char* K_MQ_RET = "mq_ret";
 
 SemaphoreHandle_t s_lock;
 Settings s_settings;
@@ -122,6 +150,33 @@ esp_err_t load() {
     get_bool(K_TR_EN, s.trig_enabled);
     get_u32(K_TR_ID, s.trig_id);
     read_str(h, K_TR_BASE, s.trig_baseline);
+    get_bool(K_INV_EN, s.can_inv_enabled);
+    get_u32(K_INV_BR, s.can_inv_bitrate);
+    get_bool(K_B_EN, s.can_b_enabled);
+    get_u32(K_B_BR, s.can_b_bitrate);
+    get_bool(K_B_ACK, s.can_b_ack);
+    get_bool(K_AG_TX, s.agg_tx_enabled);
+    get_bool(K_AG_A, s.agg_src_a);
+    get_bool(K_AG_B, s.agg_src_b);
+    get_u32(K_AG_KCAP, s.agg_kny_cap_ah);
+    get_u32(K_AG_FCVL, s.agg_fs_cvl_dv);
+    get_u32(K_AG_FDVL, s.agg_fs_dvl_dv);
+    get_u32(K_AG_CCLMX, s.agg_ccl_max);
+    get_u32(K_AG_DCLMX, s.agg_dcl_max);
+    get_bool(K_AG_SIL, s.agg_silent);
+    get_u32(K_AG_HOLD, s.agg_hold_s);
+    get_u32(K_AG_CVLH, s.agg_cvl_hold_s);
+    get_u32(K_AG_CAPA, s.agg_cap_a);
+    get_u32(K_AG_CAPP2, s.agg_cap_a_p2);
+    get_u32(K_AG_CAPB, s.agg_cap_b);
+    get_bool(K_MQ_EN, s.mqtt_enabled);
+    read_str(h, K_MQ_HOST, s.mqtt_host);
+    get_u32(K_MQ_PORT, s.mqtt_port);
+    read_str(h, K_MQ_USER, s.mqtt_user);
+    read_str(h, K_MQ_BASE, s.mqtt_base);
+    get_bool(K_MQ_DISC, s.mqtt_discovery);
+    get_u32(K_MQ_INT, s.mqtt_interval_s);
+    get_bool(K_MQ_RET, s.mqtt_retain);
     // Fall back to defaults for anything that no longer validates.
     Settings d;
     if (!valid_hostname(s.hostname)) s.hostname = d.hostname;
@@ -129,14 +184,14 @@ esp_err_t load() {
     if (!valid_timezone(s.timezone)) s.timezone = d.timezone;
     std::string why;
     if (!validate(s, why)) {
-        ESP_LOGW(TAG, "stored CAN/diagnostics settings invalid (%s), using defaults", why.c_str());
-        Settings fixed = s;
-        fixed.can_enabled = d.can_enabled; fixed.can_bitrate = d.can_bitrate;
-        fixed.diag_enabled = d.diag_enabled; fixed.diag_url = d.diag_url;
-        fixed.diag_batch = d.diag_batch; fixed.diag_flush_s = d.diag_flush_s;
-        fixed.diag_change_only = d.diag_change_only; fixed.diag_pretrig_s = d.diag_pretrig_s;
-        fixed.trig_enabled = d.trig_enabled; fixed.trig_id = d.trig_id;
-        fixed.trig_baseline = d.trig_baseline;
+        // Everything except the system settings goes back to defaults: CAN ports, aggregator
+        // and MQTT off. That is the safe state (nothing enabled, output refused).
+        ESP_LOGW(TAG, "stored CAN/aggregator/MQTT/diagnostics settings invalid (%s), using defaults", why.c_str());
+        Settings fixed = d;
+        fixed.hostname = s.hostname;
+        fixed.ntp_server = s.ntp_server;
+        fixed.timezone = s.timezone;
+        fixed.require_signed_images = s.require_signed_images;
         s = fixed;
     }
     s_settings = s;
@@ -209,7 +264,33 @@ bool validate(const Settings& s, std::string& err) {
     else if (!valid_ntp_server(s.ntp_server)) err = "invalid NTP server";
     else if (!valid_timezone(s.timezone)) err = "invalid timezone string";
     else if (!valid_can_bitrate(s.can_bitrate))
-        err = "CAN bitrate must be 125000, 250000 or 500000 (8 MHz crystal: 1 Mbit/s is impossible)";
+        err = "port A bitrate must be 125000, 250000 or 500000 (8 MHz crystal: 1 Mbit/s is impossible)";
+    else if (!valid_can_bitrate(s.can_inv_bitrate))
+        err = "port INV bitrate must be 125000, 250000 or 500000 (8 MHz crystal: 1 Mbit/s is impossible)";
+    else if (!valid_can_bitrate(s.can_b_bitrate))
+        err = "port B bitrate must be 125000, 250000 or 500000 (8 MHz crystal: 1 Mbit/s is impossible)";
+    else if (s.agg_src_a && !s.can_enabled) err = "aggregator source A needs port A enabled";
+    else if (s.agg_src_b && !s.can_b_enabled) err = "aggregator source B needs port B enabled";
+    else if (s.agg_tx_enabled && !s.can_inv_enabled) err = "inverter transmit needs port INV enabled";
+    else if (s.agg_kny_cap_ah < 1 || s.agg_kny_cap_ah > 2000) err = "KNY capacity must be 1-2000 Ah";
+    else if (s.agg_fs_cvl_dv != 0 && (s.agg_fs_cvl_dv < 400 || s.agg_fs_cvl_dv > 600))
+        err = "fail-safe CVL must be 40.0-60.0 V";
+    else if (s.agg_fs_dvl_dv != 0 && (s.agg_fs_dvl_dv < 360 || s.agg_fs_dvl_dv > 600))
+        err = "fail-safe DVL must be 36.0-60.0 V";
+    else if (s.agg_fs_cvl_dv && s.agg_fs_dvl_dv && s.agg_fs_dvl_dv >= s.agg_fs_cvl_dv)
+        err = "fail-safe DVL must be below fail-safe CVL";
+    else if (s.agg_ccl_max > 1000 || s.agg_dcl_max > 1000) err = "CCL/DCL maximum must be 0-1000 A";
+    else if (s.agg_hold_s < 5 || s.agg_hold_s > 300) err = "start-up hold must be 5-300 s";
+    else if (s.agg_cvl_hold_s > 600) err = "CVL rise hold must be 0-600 s";
+    else if (s.agg_cap_a < 1 || s.agg_cap_a > 1000 || s.agg_cap_a_p2 < 1 || s.agg_cap_a_p2 > 1000 || s.agg_cap_b < 1 ||
+             s.agg_cap_b > 1000)
+        err = "per-source caps must be 1-1000 A";
+    else if (!valid_mqtt_host(s.mqtt_host)) err = "MQTT host: up to 64 letters, digits, '.', '-' or ':'";
+    else if (s.mqtt_enabled && s.mqtt_host.empty()) err = "set an MQTT broker host before enabling MQTT";
+    else if (s.mqtt_port < 1 || s.mqtt_port > 65535) err = "MQTT port must be 1-65535";
+    else if (s.mqtt_user.size() > 64) err = "MQTT user: max 64 characters";
+    else if (!valid_mqtt_base(s.mqtt_base)) err = "MQTT base topic: 1-48 of A-Z a-z 0-9 _ - /, no wildcards";
+    else if (s.mqtt_interval_s < 2 || s.mqtt_interval_s > 3600) err = "MQTT interval must be 2-3600 s";
     else if (s.diag_url.size() > 200 ||
              (!s.diag_url.empty() && s.diag_url.rfind("http://", 0) != 0 &&
               s.diag_url.rfind("https://", 0) != 0))
@@ -250,6 +331,33 @@ esp_err_t save(const Settings& s, std::string& err) {
     ok(nvs_set_u8(h, K_TR_EN, s.trig_enabled));
     ok(nvs_set_u32(h, K_TR_ID, s.trig_id));
     ok(nvs_set_str(h, K_TR_BASE, s.trig_baseline.c_str()));
+    ok(nvs_set_u8(h, K_INV_EN, s.can_inv_enabled));
+    ok(nvs_set_u32(h, K_INV_BR, s.can_inv_bitrate));
+    ok(nvs_set_u8(h, K_B_EN, s.can_b_enabled));
+    ok(nvs_set_u32(h, K_B_BR, s.can_b_bitrate));
+    ok(nvs_set_u8(h, K_B_ACK, s.can_b_ack));
+    ok(nvs_set_u8(h, K_AG_TX, s.agg_tx_enabled));
+    ok(nvs_set_u8(h, K_AG_A, s.agg_src_a));
+    ok(nvs_set_u8(h, K_AG_B, s.agg_src_b));
+    ok(nvs_set_u32(h, K_AG_KCAP, s.agg_kny_cap_ah));
+    ok(nvs_set_u32(h, K_AG_FCVL, s.agg_fs_cvl_dv));
+    ok(nvs_set_u32(h, K_AG_FDVL, s.agg_fs_dvl_dv));
+    ok(nvs_set_u32(h, K_AG_CCLMX, s.agg_ccl_max));
+    ok(nvs_set_u32(h, K_AG_DCLMX, s.agg_dcl_max));
+    ok(nvs_set_u8(h, K_AG_SIL, s.agg_silent));
+    ok(nvs_set_u32(h, K_AG_HOLD, s.agg_hold_s));
+    ok(nvs_set_u32(h, K_AG_CVLH, s.agg_cvl_hold_s));
+    ok(nvs_set_u32(h, K_AG_CAPA, s.agg_cap_a));
+    ok(nvs_set_u32(h, K_AG_CAPP2, s.agg_cap_a_p2));
+    ok(nvs_set_u32(h, K_AG_CAPB, s.agg_cap_b));
+    ok(nvs_set_u8(h, K_MQ_EN, s.mqtt_enabled));
+    ok(nvs_set_str(h, K_MQ_HOST, s.mqtt_host.c_str()));
+    ok(nvs_set_u32(h, K_MQ_PORT, s.mqtt_port));
+    ok(nvs_set_str(h, K_MQ_USER, s.mqtt_user.c_str()));
+    ok(nvs_set_str(h, K_MQ_BASE, s.mqtt_base.c_str()));
+    ok(nvs_set_u8(h, K_MQ_DISC, s.mqtt_discovery));
+    ok(nvs_set_u32(h, K_MQ_INT, s.mqtt_interval_s));
+    ok(nvs_set_u8(h, K_MQ_RET, s.mqtt_retain));
     ok(nvs_commit(h));
     nvs_close(h);
     if (e == ESP_OK) s_settings = s;
@@ -274,6 +382,25 @@ esp_err_t set_diag_token(const std::string& t) {
         if (!isprint((unsigned char)c)) return ESP_ERR_INVALID_ARG;
     Lock l;
     return write_strs({{K_DG_TOK, &t}});
+}
+
+std::string mqtt_password() {
+    Lock l;
+    nvs_handle_t h;
+    std::string v;
+    if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
+        read_str(h, K_MQ_PASS, v);
+        nvs_close(h);
+    }
+    return v;
+}
+
+esp_err_t set_mqtt_password(const std::string& p) {
+    if (p.size() > 128) return ESP_ERR_INVALID_ARG;
+    for (char c : p)
+        if (!isprint((unsigned char)c)) return ESP_ERR_INVALID_ARG;
+    Lock l;
+    return write_strs({{K_MQ_PASS, &p}});
 }
 
 esp_err_t set_hostname(const std::string& v) {
@@ -452,6 +579,20 @@ int parse_hex_bytes(const std::string& hex, uint8_t out[8]) {
         out[i / 2] = (uint8_t)v;
     }
     return (int)hex.size() / 2;
+}
+
+bool valid_mqtt_host(const std::string& v) {
+    if (v.size() > 64) return false;
+    for (char c : v)
+        if (!(isalnum((unsigned char)c) || c == '-' || c == '.' || c == ':')) return false;
+    return true;
+}
+
+bool valid_mqtt_base(const std::string& v) {
+    if (v.empty() || v.size() > 48 || v.front() == '/' || v.back() == '/') return false;
+    for (char c : v)
+        if (!(isalnum((unsigned char)c) || c == '_' || c == '-' || c == '/')) return false;
+    return true;
 }
 
 bool valid_ssid(const std::string& v) { return !v.empty() && v.size() <= 32; }

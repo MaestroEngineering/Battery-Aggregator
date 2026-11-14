@@ -2,7 +2,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const VIEWS = ['dashboard', 'can', 'system', 'firmware', 'log'];
+const VIEWS = ['dashboard', 'agg', 'can', 'system', 'firmware', 'log'];
 let timer = null;
 
 // ---- API ------------------------------------------------------------------
@@ -69,7 +69,7 @@ function route() {
   VIEWS.forEach((v) => $('v-' + v).classList.toggle('hidden', v !== view));
   document.querySelectorAll('#nav a').forEach((a) =>
     a.classList.toggle('active', a.dataset.view === view));
-  ({ dashboard: loadDashboard, can: () => loadCan(), system: loadSystem, firmware: loadFirmware, log: loadLog })[view]();
+  ({ dashboard: loadDashboard, agg: () => loadAgg(), can: () => loadCan(), system: loadSystem, firmware: loadFirmware, log: loadLog })[view]();
 }
 
 // Dashboard
@@ -86,7 +86,7 @@ async function refreshStatus() {
     st.className = s.selftest === 'passed' ? 'ok' : s.selftest === 'failed' ? 'bad' : 'warn';
     setText('d-uptime', fmtUptime(s.uptime_s));
     setText('d-heap', kb(s.heap_free) + ' (largest block ' + kb(s.heap_largest) + ')');
-    setText('d-heapmin', kb(s.heap_min));
+    setText('d-heapmin', kb(s.heap_min) + (s.heap_min_largest === undefined ? '' : ' (lowest largest block ' + kb(s.heap_min_largest) + ', low episodes ' + s.heap_low_episodes + ')'));
     setText('d-reset', s.reset_reason);
     setText('d-time', s.time ? s.time + (s.time_synced ? '' : ' (not synced)') : 'not set (no NTP yet)');
     setText('d-mode', s.wifi_mode);
@@ -113,6 +113,7 @@ async function loadSystem() {
     $('tz').value = s.system.timezone;
   } catch (e) { return; /* login shown on 401 */ }
   loadDiag();  // can.js
+  loadMqtt();  // agg.js
 }
 
 function bindForm(id, fn) {

@@ -1,7 +1,7 @@
 // Verbose Diagnostics: buffer CAN frames into batches and POST them to the
 // user's server (SPEC.md "Verbose Diagnostics: data logging and upload").
 //
-//  - Frames are written into fixed RAM batch buffers (kSlots x kMaxBatch). The
+//  - Frames are written into fixed RAM batch buffers (kSlots x diag_batch). The
 //    CAN task only ever appends under a short spinlock: it never waits on the
 //    network.
 //  - A buffer is sealed when it holds `diag_batch` frames or `diag_flush_s`
@@ -28,6 +28,7 @@
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "heapmon/heapmon.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -58,6 +59,9 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t s_task = nullptr;
 Slot s_slots[kSlots];
 can::Record* s_mem = nullptr;
+uint32_t s_cap = 0;  // frames per slot actually allocated (diag_batch at first enable)
+// An event batch never takes the heap below this largest free block (web UI, MQTT, WiFi).
+constexpr size_t kEventKeepFree = 16 * 1024;
 uint32_t s_seal_order = 0;
 
 // Settings cache (read by the CAN task without touching NVS or the heap).
@@ -257,8 +261,12 @@ void build_event_batch(const can::Record& ev, int64_t ev_us) {
     }
     uint16_t flags = kFlagEvent;
     if (s_pretrig_s && (oldest == UINT64_MAX || oldest > from + 1000000)) flags |= kFlagTruncated;
-    // Allocate (halve on failure; the newest frames matter most).
+    // Allocate (halve on failure; the newest frames matter most), never below kEventKeepFree
+    // in the largest block: the pre-trigger window can be the whole 36 KB CAN ring.
     uint32_t want = count;
+    size_t lg = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t room = lg > kEventKeepFree + 64 ? (lg - kEventKeepFree - 64) / sizeof(can::Record) : 0;
+    if (want > room) want = (uint32_t)room;
     while (want && !(s_ev_buf = (can::Record*)malloc(want * sizeof(can::Record)))) want /= 2;
     if (want < count) flags |= kFlagTruncated;
     // Pass 2: copy the newest `want` frames in the window.
@@ -290,20 +298,30 @@ void apply() {
     uint8_t base[8] = {};
     int blen = cfg::parse_hex_bytes(s.trig_baseline, base);
     bool want_active = s.diag_enabled && !s.diag_url.empty();
+    // The buffers are sized by the batch setting when uploads are first enabled
+    // (kSlots x diag_batch x 24 bytes: 36 KB at 500, 18 KB at 250, 9 KB at 125). A larger
+    // batch setting later takes effect after a reboot; a smaller one at once.
     if (want_active && !s_mem) {
-        s_mem = (can::Record*)heap_caps_malloc(kSlots * kMaxBatch * sizeof(can::Record), MALLOC_CAP_8BIT);
+        uint32_t cap = s.diag_batch < 50 ? 50 : s.diag_batch > (uint32_t)kMaxBatch ? kMaxBatch : s.diag_batch;
+        s_mem = (can::Record*)heap_caps_malloc(kSlots * cap * sizeof(can::Record), MALLOC_CAP_8BIT);
         if (!s_mem) {
-            ESP_LOGE(TAG, "no RAM for the batch buffers (%u bytes)",
-                     (unsigned)(kSlots * kMaxBatch * sizeof(can::Record)));
+            ESP_LOGE(TAG, "no RAM for the batch buffers (%u bytes)", (unsigned)(kSlots * cap * sizeof(can::Record)));
             set_err("not enough RAM for the batch buffers");
             want_active = false;
         } else {
-            for (int i = 0; i < kSlots; i++) s_slots[i].recs = s_mem + i * kMaxBatch;
+            s_cap = cap;
+            heapmon::mark("diag buffers allocated");
+            ESP_LOGI(TAG, "batch buffers: %d x %lu frames (%u bytes)", kSlots, (unsigned long)cap,
+                     (unsigned)(kSlots * cap * sizeof(can::Record)));
+            for (int i = 0; i < kSlots; i++) s_slots[i].recs = s_mem + i * cap;
         }
     }
+    if (s_mem && s.diag_batch > s_cap)
+        ESP_LOGW(TAG, "batch size %lu frames takes effect after a reboot (buffers hold %lu)",
+                 (unsigned long)s.diag_batch, (unsigned long)s_cap);
     portENTER_CRITICAL(&s_mux);
     s_enabled = s.diag_enabled;
-    s_batch = s.diag_batch;
+    s_batch = s_mem && s.diag_batch > s_cap ? s_cap : s.diag_batch;
     s_flush_s = s.diag_flush_s;
     s_pretrig_s = s.diag_pretrig_s;
     s_change_only = s.diag_change_only;
@@ -313,6 +331,8 @@ void apply() {
     memcpy(s_trig_base, base, 8);
     Slot* f = find(S_FILLING);
     if (f && f->n >= s_batch) seal(f);
+    // An event raised while uploads were off is not sent later.
+    if (!s_active && want_active) s_event_pending = false;
     s_active = want_active;
     portEXIT_CRITICAL(&s_mux);
     ESP_LOGI(TAG, "Verbose Diagnostics %s%s; trigger %s (id 0x%lX, baseline %s)",
@@ -328,6 +348,14 @@ void task(void*) {
         int64_t now = esp_timer_get_time();
         if (!s_active) {
             s_state_txt = s_enabled ? "not configured" : "off";
+            if (s_event_pending) {
+                // Diagnostics off: the event is counted and logged, but no batch is
+                // built, so it cannot be uploaded later when diagnostics is enabled.
+                portENTER_CRITICAL(&s_mux);
+                s_event_pending = false;
+                portEXIT_CRITICAL(&s_mux);
+                ESP_LOGI(TAG, "event not uploaded: Verbose Diagnostics is off");
+            }
             continue;
         }
 

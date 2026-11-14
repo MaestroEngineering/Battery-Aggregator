@@ -158,17 +158,18 @@ setInterval(() => { if (CAP.ws) capRender(); }, 1000);
 let prevBytes = {};
 
 function renderTable(rows) {
-  rows.sort((a, b) => (a.x - b.x) || (a.id - b.id));
+  rows.sort((a, b) => (a.pt - b.pt) || (a.x - b.x) || (a.id - b.id));
   const tb = $('tbl').tBodies[0];
   const frag = document.createDocumentFragment();
   const next = {};
   for (const r of rows) {
-    const key = (r.x ? 'x' : 's') + r.id;
+    const key = r.pt + (r.x ? 'x' : 's') + r.id;
     const prev = prevBytes[key] || '';
     next[key] = r.d;
     const tr = document.createElement('tr');
     if (r.p && r.a > Math.max(3 * r.p, 2000)) tr.className = 'stale';
     const td = (text, cls) => { const c = document.createElement('td'); c.textContent = text; if (cls) c.className = cls; tr.appendChild(c); return c; };
+    td(['INV', 'A', 'B'][r.pt] || '?');
     td(idText(r.id, r.x) + (r.r ? ' R' : ''));
     td(r.n.toLocaleString(), 'num');
     td(r.p ? r.p + ' ms (' + (1000 / r.p).toFixed(r.p > 1000 ? 2 : 1) + ' Hz)' : '-', 'num');
@@ -212,6 +213,77 @@ function renderDetect(d) {
   if (d.suggestion) { b.textContent = 'Use ' + (d.suggestion / 1000) + ' kbit/s'; b.dataset.br = d.suggestion; }
 }
 
+function renderProbe(p) {
+  if (!p) return;
+  const dl = $('probe-list');
+  dl.textContent = '';
+  const add = (k, v, cls) => {
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v; if (cls) dd.className = cls;
+    dl.append(dt, dd);
+  };
+  if (p.running) return add('Result', 'checking…');
+  if (!p.done) return add('Result', 'not run yet');
+  for (const r of p.ports) {
+    const ok = r.spi_ok && r.int_ok && r.listen_ok && !r.note;
+    const label = 'Port ' + r.name + ' (CS ' + r.cs + ', INT ' + r.int + ')';
+    add(label, ok ? 'OK, ' + r.frames + ' frames / ' + r.errors + ' errors in 1 s' : 'FAIL: ' + r.note, ok ? 'ok' : 'bad');
+  }
+  add('Checked', (p.bitrate / 1000) + ' kbit/s, ' + (p.age_s < 60 ? p.age_s + ' s' : Math.round(p.age_s / 60) + ' min') + ' ago');
+}
+
+// ---- INT-line mapping (bench only) -----------------------------------------------------
+const INTMAP_CHECKS = {
+  no_spi: 'Check by hand: module 5 V power; level shifter OE pin high; CS pull-up (10k to 3.3 V); SCK/MOSI/MISO through the shifter; crystal marking (8.000 MHz expected).',
+  no_frames: 'Check by hand: CAN-H/CAN-L to this module; termination (about 60 ohm across the pair, power off); crystal marking (8.000 MHz expected); bench script running.',
+  no_int: 'Check by hand: INT pin on the module to its divider (1k over 2k) to the GPIO; divider ground; which GPIO it lands on (only the candidates were scanned).',
+  multi_int: 'Check by hand: INT lines shorted together or dividers sharing a node (never wire-OR INT).',
+  inconsistent: 'Check by hand: loose INT wire or divider joint; run the mapping again.',
+};
+
+function renderIntmap(m) {
+  const out = $('intmap-out');
+  if (!m || !out) return;
+  out.textContent = '';
+  const p = (t, cls) => { const e = document.createElement('p'); e.textContent = t; if (cls) e.className = cls; out.append(e); return e; };
+  if (m.running) p('mapping… module ' + (m.port || '?') + ' (waiting for test frames from the bench script)');
+  if (!m.done && !m.running) { p('not run yet', 'hint'); return; }
+  const tbl = document.createElement('table');
+  tbl.className = 'frames';
+  const row = (cells, tag) => {
+    const tr = document.createElement('tr');
+    for (const c of cells) { const td = document.createElement(tag || 'td'); td.textContent = c; tr.append(td); }
+    tbl.append(tr); return tr;
+  };
+  row(['Module', 'CS', 'INT found', 'INT in pins.h', 'Rounds', 'Result'], 'th');
+  const fmtRound = (g) => g >= 0 ? String(g) : g === -1 ? 'none' : 'several';
+  let differ = false;
+  for (const r of m.ports) {
+    const ok = r.result === 'ok';
+    const same = ok && r.found === r.int_pins_h;
+    differ = differ || (ok && !same);
+    const res = r.result === 'not_run' ? 'pending' : ok ? (same ? 'OK, matches pins.h' : 'DIFFERS from pins.h') : r.result_text + ': ' + r.note;
+    const tr = row([r.name, r.cs, ok ? r.found : '-', r.int_pins_h,
+      r.per_round.length + '/' + m.rounds_wanted + (r.per_round.length ? ' [' + r.per_round.map(fmtRound).join(', ') + ']' : ''), res]);
+    tr.lastChild.className = ok ? (same ? 'ok' : 'warn') : r.result === 'not_run' ? '' : 'bad';
+  }
+  const wrap = document.createElement('div');
+  wrap.style.overflowX = 'auto';
+  wrap.append(tbl);
+  out.append(wrap);
+  if (m.running) return;
+  for (const r of m.ports) if (INTMAP_CHECKS[r.result]) p('Module ' + r.name + ': ' + INTMAP_CHECKS[r.result], 'hint');
+  if (differ) {
+    p('The wiring differs from pins.h. Proposed mapping (not applied; pins.h is unchanged):', 'warn');
+    const pre = document.createElement('pre');
+    pre.textContent = m.ports.filter((r) => r.result === 'ok')
+      .map((r) => '#define BMS_CAN_' + r.name + '_INT ' + r.found + '   // now ' + r.int_pins_h).join('\n');
+    out.append(pre);
+  }
+  p('Candidates scanned: GPIO ' + m.candidates.join(', ') + '. Bitrate ' + (m.bitrate / 1000) + ' kbit/s, ' +
+    (m.age_s < 60 ? m.age_s + ' s' : Math.round(m.age_s / 60) + ' min') + ' ago.', 'hint');
+}
+
 async function refreshCan() {
   try {
     const [s, t] = await Promise.all([api('/api/can/status'), api('/api/can/table')]);
@@ -231,8 +303,26 @@ async function refreshCan() {
     bl.className = s.blocked_cmds ? 'bad' : '';
     setText('c-ring', s.ring_used + ' / ' + s.ring_size + ' frames');
     renderDetect(s.detect);
+    renderPorts(s.ports);
+    renderProbe(s.probe);
+    renderIntmap(s.intmap);
     renderTable(t);
   } catch (e) { /* 401 handled by api() */ }
+}
+
+function renderPorts(ports) {
+  if (!ports) return;
+  const ids = ['inv', 'a', 'b'];
+  ports.forEach((p, k) => {
+    const id = ids[k];
+    const st = $('p-' + id + '-st');
+    st.textContent = p.enabled ? p.state + (p.error ? ' (' + p.error + ')' : '') : 'off';
+    st.className = (p.state === 'listen-only' || p.state === 'normal (ACK only)' || p.state === 'transmitting') ? 'ok' : p.state === 'error' ? 'bad' : '';
+    setText('p-' + id + '-fps', p.enabled ? p.fps + '/s' + (p.tx_frames || p.tx_failed ? ', sent ' + p.tx_frames + ' / failed ' + p.tx_failed : '') : '-');
+    setText('p-' + id + '-age', p.last_frame_age_ms < 0 ? '-' : (p.last_frame_age_ms / 1000).toFixed(1) + ' s');
+    setText('p-' + id + '-err', p.bus_errors + ' / ' + p.rx_overflows + ' ovr / REC ' + p.rec + (id !== 'a' ? ' / TEC ' + p.tec : ''));
+    if (id === 'a') setText('p-a-br', (p.bitrate / 1000) + 'k');
+  });
 }
 
 async function loadCan() {
@@ -240,6 +330,11 @@ async function loadCan() {
     const s = await api('/api/settings');
     $('can-en').checked = s.can.enabled;
     $('can-br').value = String(s.can.bitrate);
+    $('p-inv-en').checked = s.can_inv.enabled;
+    $('p-inv-br').value = String(s.can_inv.bitrate);
+    $('p-b-en').checked = s.can_b.enabled;
+    $('p-b-br').value = String(s.can_b.bitrate);
+    $('p-b-ack').checked = s.can_b.ack;
   } catch (e) { return; }
   prevBytes = {};
   capRender();
@@ -250,6 +345,14 @@ async function loadCan() {
 async function saveCan(enabled, bitrate) {
   await api('/api/settings', { method: 'POST', body: { can: { enabled, bitrate: Number(bitrate) } } });
 }
+
+bindForm('f-ports', async (f) => {
+  await api('/api/settings', { method: 'POST', body: {
+    can_inv: { enabled: $('p-inv-en').checked, bitrate: Number($('p-inv-br').value) },
+    can_b: { enabled: $('p-b-en').checked, bitrate: Number($('p-b-br').value), ack: $('p-b-ack').checked } } });
+  say(formMsg(f), 'Saved and applied.', 'ok');
+  refreshCan();
+});
 
 bindForm('f-can', async (f) => {
   await saveCan($('can-en').checked, $('can-br').value);
@@ -267,6 +370,49 @@ $('can-detect').addEventListener('click', async () => {
       const s = await api('/api/can/status');
       renderDetect(s.detect);
       if (!s.detect.running) { clearInterval(detectPoll); detectPoll = null; say(m, s.detect.note, s.detect.suggestion ? 'ok' : 'warn'); }
+    }, 1000);
+  } catch (e) { say(m, e.message, 'bad'); }
+});
+
+$('can-probe').addEventListener('click', async () => {
+  const m = $('probe-msg');
+  try {
+    await api('/api/can/probe', { method: 'POST' });
+    say(m, 'Checking the modules (about 4 s)…', '');
+    renderProbe({ running: true });
+    const poll = setInterval(async () => {
+      try {
+        const s = await api('/api/can/status');
+        renderProbe(s.probe);
+        if (!s.probe.running) {
+          clearInterval(poll);
+          const bad = s.probe.ports.filter((r) => !(r.spi_ok && r.int_ok && r.listen_ok && !r.note));
+          say(m, bad.length ? bad.length + ' module(s) failed, see above' : 'All three modules OK', bad.length ? 'bad' : 'ok');
+        }
+      } catch (e) { clearInterval(poll); }
+    }, 1000);
+  } catch (e) { say(m, e.message, 'bad'); }
+});
+
+$('can-intmap').addEventListener('click', async () => {
+  const m = $('intmap-msg');
+  try {
+    await api('/api/can/intmap', { method: 'POST' });
+    say(m, 'Mapping INT lines. Bench only: tools/bench_can_check.py --bench --tests 4 must be sending.', 'warn');
+    renderIntmap({ running: true, done: false, ports: [] });
+    const poll = setInterval(async () => {
+      try {
+        const s = await api('/api/can/status');
+        renderIntmap(s.intmap);
+        if (!s.intmap.running) {
+          clearInterval(poll);
+          const bad = s.intmap.ports.filter((r) => r.result !== 'ok');
+          const diff = s.intmap.ports.filter((r) => r.result === 'ok' && r.found !== r.int_pins_h);
+          say(m, bad.length ? bad.length + ' module(s) without a clear INT pin, see above'
+            : diff.length ? 'INT wiring differs from pins.h, see the proposal above' : 'All three INT lines match pins.h',
+          bad.length ? 'bad' : diff.length ? 'warn' : 'ok');
+        }
+      } catch (e) { clearInterval(poll); }
     }, 1000);
   } catch (e) { say(m, e.message, 'bad'); }
 });

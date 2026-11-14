@@ -9,6 +9,9 @@
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "heapmon/heapmon.h"
+#include "json_stream.h"
+#include "settings_json.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -18,6 +21,8 @@
 #include "ota/ota.h"
 #include "can/can.h"
 #include "diag/diag.h"
+#include "agg/agg.h"
+#include "hamqtt/hamqtt.h"
 #include <ctype.h>
 #include "webserver/webserver.h"
 
@@ -174,89 +179,85 @@ esp_err_t send_scan(httpd_req_t* req) {
 
 // ---- Status / dashboard -----------------------------------------------------------------
 
+bool status_sink(void* ctx, const char* data, size_t len) {
+    return httpd_resp_send_chunk((httpd_req_t*)ctx, data, len) == ESP_OK;
+}
+
+// Polled every 2 s by the Dashboard: streamed (JsonOut), no cJSON tree.
 esp_err_t h_status(httpd_req_t* req) {
     const esp_app_desc_t* d = esp_app_get_description();
     esp_chip_info_t chip;
     esp_chip_info(&chip);
-    cJSON* o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "project", d->project_name);
-    cJSON_AddStringToObject(o, "version", d->version);
-    cJSON_AddStringToObject(o, "git", BMS_GIT_HASH);
-    cJSON_AddStringToObject(o, "build_date", d->date);
-    cJSON_AddStringToObject(o, "build_time", d->time);
-    cJSON_AddStringToObject(o, "idf", d->idf_ver);
-    cJSON_AddStringToObject(o, "chip", CONFIG_IDF_TARGET);
-    cJSON_AddNumberToObject(o, "chip_rev", chip.revision);
-    cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
-    cJSON_AddNumberToObject(o, "heap_free", esp_get_free_heap_size());
-    cJSON_AddNumberToObject(o, "heap_min", esp_get_minimum_free_heap_size());
-    cJSON_AddNumberToObject(o, "heap_largest", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    cJSON_AddStringToObject(o, "reset_reason", reset_reason());
-    cJSON_AddStringToObject(o, "wifi_mode", net::mode_name());
-    cJSON_AddStringToObject(o, "ssid", net::connected_ssid().c_str());
-    cJSON_AddStringToObject(o, "ip", net::sta_ip().c_str());
-    cJSON_AddNumberToObject(o, "rssi", net::rssi());
-    cJSON_AddBoolToObject(o, "ap_up", net::ap_up());
-    cJSON_AddStringToObject(o, "ap_ssid", net::ap_ssid().c_str());
-    cJSON_AddStringToObject(o, "hostname", cfg::get().hostname.c_str());
-    cJSON_AddStringToObject(o, "time", now_str().c_str());
-    cJSON_AddBoolToObject(o, "time_synced", net::time_synced());
-    cJSON_AddStringToObject(o, "selftest", ota::selftest_state());
-    cJSON_AddStringToObject(o, "selftest_detail", ota::selftest_detail());
+    heapmon::Stats hs = heapmon::stats();
     can::Status cs = can::status();
-    cJSON_AddStringToObject(o, "can_state", can::state_name(cs.state));
-    cJSON_AddNumberToObject(o, "can_bitrate", cs.bitrate);
-    cJSON_AddNumberToObject(o, "can_fps", cs.fps);
-    cJSON_AddStringToObject(o, "diag_state", diag::status().state);
-    return send_json(req, o);
+    httpd_resp_set_type(req, "application/json");
+    JsonOut j(status_sink, req);
+    j.begin();
+    j.str("project", d->project_name);
+    j.str("version", d->version);
+    j.str("git", BMS_GIT_HASH);
+    j.str("build_date", d->date);
+    j.str("build_time", d->time);
+    j.str("idf", d->idf_ver);
+    j.str("chip", CONFIG_IDF_TARGET);
+    j.num("chip_rev", chip.revision);
+    j.num("uptime_s", (double)(esp_timer_get_time() / 1000000));
+    j.num("heap_free", hs.free);
+    j.num("heap_min", hs.min_free);
+    j.num("heap_largest", hs.largest);
+    j.num("heap_min_largest", hs.min_largest);
+    j.num("heap_low_episodes", hs.low_episodes);
+    j.num("heap_last_low_age_s", (double)hs.last_low_age_s);
+    j.arr("heap_marks");
+    for (int i = 0; i < hs.nmarks; i++) {
+        j.obj();
+        j.str("what", hs.marks[i].what);
+        j.num("uptime_s", hs.marks[i].uptime_s);
+        j.num("free", hs.marks[i].free);
+        j.num("largest", hs.marks[i].largest);
+        j.end_obj();
+    }
+    j.end_arr();
+    j.str("reset_reason", reset_reason());
+    j.str("wifi_mode", net::mode_name());
+    j.str("ssid", net::connected_ssid().c_str());
+    j.str("ip", net::sta_ip().c_str());
+    j.num("rssi", net::rssi());
+    j.boolean("ap_up", net::ap_up());
+    j.str("ap_ssid", net::ap_ssid().c_str());
+    j.str("hostname", cfg::get().hostname.c_str());
+    j.str("time", now_str().c_str());
+    j.boolean("time_synced", net::time_synced());
+    j.str("selftest", ota::selftest_state());
+    j.str("selftest_detail", ota::selftest_detail());
+    j.str("can_state", can::state_name(cs.state));
+    j.num("can_bitrate", cs.bitrate);
+    j.num("can_fps", cs.fps);
+    j.str("diag_state", diag::status().state);
+    if (!j.end()) return ESP_FAIL;
+    return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 esp_err_t h_log(httpd_req_t* req) {
-    std::string s = applog::dump();
+    // Streamed: the log ring is up to 16 KB, too much for one heap block.
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_send(req, s.data(), s.size());
+    if (!applog::dump_to(status_sink, req)) return ESP_FAIL;
+    return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 // ---- System -----------------------------------------------------------------------------
 
 cJSON* settings_json(bool for_export) {
-    cfg::Settings s = cfg::get();
-    cJSON* o = cJSON_CreateObject();
-    if (for_export) {
-        cJSON_AddStringToObject(o, "schema", "bms-agg-config");
-        cJSON_AddNumberToObject(o, "schema_version", 1);
-        cJSON_AddStringToObject(o, "firmware", esp_app_get_description()->version);
-        cJSON_AddStringToObject(o, "exported_at", now_str().c_str());
+    std::string now = for_export ? now_str() : std::string(), ssid = cfg::wifi_ssid();
+    SettingsExtras x;
+    x.firmware = esp_app_get_description()->version;
+    x.exported_at = now.c_str();
+    if (!for_export) {  // never exported; even then only whether a secret is set
+        x.token_set = !cfg::diag_token().empty();
+        x.password_set = !cfg::mqtt_password().empty();
     }
-    cJSON* sys = cJSON_AddObjectToObject(o, "system");
-    cJSON_AddStringToObject(sys, "hostname", s.hostname.c_str());
-    cJSON_AddStringToObject(sys, "ntp_server", s.ntp_server.c_str());
-    cJSON_AddStringToObject(sys, "timezone", s.timezone.c_str());
-    cJSON* ota = cJSON_AddObjectToObject(o, "ota");
-    cJSON_AddBoolToObject(ota, "require_signed_images", s.require_signed_images);
-    cJSON* can = cJSON_AddObjectToObject(o, "can");
-    cJSON_AddBoolToObject(can, "enabled", s.can_enabled);
-    cJSON_AddNumberToObject(can, "bitrate", s.can_bitrate);
-    cJSON* dg = cJSON_AddObjectToObject(o, "diag");
-    cJSON_AddBoolToObject(dg, "enabled", s.diag_enabled);
-    cJSON_AddStringToObject(dg, "url", s.diag_url.c_str());
-    cJSON_AddNumberToObject(dg, "batch", s.diag_batch);
-    cJSON_AddNumberToObject(dg, "flush_s", s.diag_flush_s);
-    cJSON_AddBoolToObject(dg, "change_only", s.diag_change_only);
-    cJSON_AddNumberToObject(dg, "pretrigger_s", s.diag_pretrig_s);
-    cJSON* tr = cJSON_AddObjectToObject(o, "trigger");
-    cJSON_AddBoolToObject(tr, "enabled", s.trig_enabled);
-    char id[16];
-    snprintf(id, sizeof(id), "0x%lX", (unsigned long)s.trig_id);
-    cJSON_AddStringToObject(tr, "id", id);
-    cJSON_AddStringToObject(tr, "baseline", s.trig_baseline.c_str());
-    if (!for_export) {
-        // Never exported: the token is a secret. Only whether one is set.
-        cJSON_AddBoolToObject(dg, "token_set", !cfg::diag_token().empty());
-        cJSON* w = cJSON_AddObjectToObject(o, "wifi");
-        cJSON_AddStringToObject(w, "ssid", cfg::wifi_ssid().c_str());
-    }
-    return o;
+    x.wifi_ssid = ssid.c_str();
+    return settings_json_build(cfg::get(), x, for_export);
 }
 
 esp_err_t h_settings_get(httpd_req_t* req) { return send_json(req, settings_json(false)); }
@@ -292,6 +293,14 @@ struct Section {
         if (!cJSON_IsBool(v)) fail(std::string(name) + "." + k + " must be true or false");
         else out = cJSON_IsTrue(v);
     }
+    // Volts with 0.1 V resolution, stored as decivolts (0 = not set).
+    void decivolts(const char* k, uint32_t& out) {
+        cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, k);
+        if (!v) return;
+        if (!cJSON_IsNumber(v) || v->valuedouble < 0 || v->valuedouble > 100)
+            fail(std::string(name) + "." + k + " must be a voltage (0 = not set)");
+        else out = (uint32_t)(v->valuedouble * 10.0 + 0.5);
+    }
     void u32(const char* k, uint32_t& out) {
         cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, k);
         if (!v) return;
@@ -304,7 +313,7 @@ struct Section {
 // Validates and applies {system, ota, can, diag, trigger}. All-or-nothing.
 esp_err_t apply_settings(cJSON* j, std::string& err, bool strict_top) {
     static const char* kTop[] = {"schema", "schema_version", "firmware", "exported_at",
-                                 "system", "ota", "can", "diag", "trigger"};
+                                 "system", "ota", "can", "can_inv", "can_b", "agg", "mqtt", "diag", "trigger"};
     if (strict_top) {
         cJSON* schema = cJSON_GetObjectItemCaseSensitive(j, "schema");
         if (!cJSON_IsString(schema) || strcmp(schema->valuestring, "bms-agg-config") != 0) {
@@ -360,6 +369,54 @@ esp_err_t apply_settings(cJSON* j, std::string& err, bool strict_top) {
         s.u32("bitrate", next.can_bitrate);
         bad |= s.bad;
     }
+    for (const char* port : {"can_inv", "can_b"}) {
+        if (cJSON* o = section(port); !bad && o) {
+            if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+            Section s{o, port, err};
+            bool inv = port[4] == 'i';
+            if (inv) s.check_keys({"enabled", "bitrate"});
+            else s.check_keys({"enabled", "bitrate", "ack"});
+            s.boolean("enabled", inv ? next.can_inv_enabled : next.can_b_enabled);
+            s.u32("bitrate", inv ? next.can_inv_bitrate : next.can_b_bitrate);
+            if (!inv) s.boolean("ack", next.can_b_ack);
+            bad |= s.bad;
+        }
+    }
+    if (cJSON* o = section("agg"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "agg", err};
+        s.check_keys({"src_a", "src_b", "kny_capacity_ah", "failsafe_cvl", "failsafe_dvl", "ccl_max", "dcl_max",
+                      "silent", "startup_hold_s", "cvl_hold_s", "cap_a", "cap_a_pack2", "cap_b"});
+        s.boolean("src_a", next.agg_src_a);
+        s.boolean("src_b", next.agg_src_b);
+        s.u32("kny_capacity_ah", next.agg_kny_cap_ah);
+        s.decivolts("failsafe_cvl", next.agg_fs_cvl_dv);
+        s.decivolts("failsafe_dvl", next.agg_fs_dvl_dv);
+        s.u32("ccl_max", next.agg_ccl_max);
+        s.u32("dcl_max", next.agg_dcl_max);
+        s.boolean("silent", next.agg_silent);
+        s.u32("startup_hold_s", next.agg_hold_s);
+        s.u32("cvl_hold_s", next.agg_cvl_hold_s);
+        s.u32("cap_a", next.agg_cap_a);
+        s.u32("cap_a_pack2", next.agg_cap_a_p2);
+        s.u32("cap_b", next.agg_cap_b);
+        bad |= s.bad;
+    }
+    if (cJSON* o = section("mqtt"); !bad && o) {
+        if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
+        Section s{o, "mqtt", err};
+        // password_set is read-only; tolerated so a GET result can be posted back.
+        s.check_keys({"enabled", "host", "port", "user", "base", "discovery", "interval_s", "retain", "password_set"});
+        s.boolean("enabled", next.mqtt_enabled);
+        s.str("host", next.mqtt_host);
+        s.u32("port", next.mqtt_port);
+        s.str("user", next.mqtt_user);
+        s.str("base", next.mqtt_base);
+        s.boolean("discovery", next.mqtt_discovery);
+        s.u32("interval_s", next.mqtt_interval_s);
+        s.boolean("retain", next.mqtt_retain);
+        bad |= s.bad;
+    }
     if (cJSON* o = section("diag"); !bad && o) {
         if (o == (cJSON*)-1) return ESP_ERR_INVALID_ARG;
         Section s{o, "diag", err};
@@ -391,24 +448,50 @@ esp_err_t apply_settings(cJSON* j, std::string& err, bool strict_top) {
         bad |= s.bad;
     }
     if (bad) return ESP_ERR_INVALID_ARG;
+    // Inverter transmit is never switched on here (only POST /api/agg/transmit with the typed
+    // confirmation). Disabling port INV or changing its bitrate switches it off, so it can
+    // never resume on its own at a different bitrate or after the port is re-enabled.
+    if (cur.agg_tx_enabled && (!next.can_inv_enabled || next.can_inv_bitrate != cur.can_inv_bitrate)) {
+        next.agg_tx_enabled = false;
+        ESP_LOGW(TAG, "inverter transmit switched off (port INV disabled or bitrate changed)");
+    }
 
     esp_err_t e = cfg::save(next, err);
     if (e != ESP_OK) return e;
     if (next.hostname != cur.hostname) net::apply_hostname();
     if (next.ntp_server != cur.ntp_server || next.timezone != cur.timezone) net::apply_time_config();
-    if (next.can_enabled != cur.can_enabled || next.can_bitrate != cur.can_bitrate) can::apply_settings();
+    if (next.can_enabled != cur.can_enabled || next.can_bitrate != cur.can_bitrate ||
+        next.can_inv_enabled != cur.can_inv_enabled || next.can_inv_bitrate != cur.can_inv_bitrate ||
+        next.can_b_enabled != cur.can_b_enabled || next.can_b_bitrate != cur.can_b_bitrate ||
+        next.can_b_ack != cur.can_b_ack || next.agg_tx_enabled != cur.agg_tx_enabled)
+        can::apply_settings();  // bitrates take effect at once, no reboot
+    agg::apply_settings();
+    hamqtt::apply_settings();
     diag::apply_settings();
     return ESP_OK;
 }
 
 esp_err_t h_settings_post(httpd_req_t* req) {
-    cJSON* j = read_json(req, 2048);
+    cJSON* j = read_json(req, 4096);
     if (!j) return ESP_OK;
     std::string err;
     esp_err_t e = apply_settings(j, err, false);
     cJSON_Delete(j);
     if (e != ESP_OK) return send_error(req, "400 Bad Request", err);
     return send_json(req, settings_json(false));
+}
+
+// MQTT broker password: a secret, stored in NVS only, never returned or exported.
+esp_err_t h_mqtt_password(httpd_req_t* req) {
+    cJSON* j = read_json(req, 512);
+    if (!j) return ESP_OK;
+    std::string p = json_str(j, "password");
+    cJSON_Delete(j);
+    if (cfg::set_mqtt_password(p) != ESP_OK)
+        return send_error(req, "400 Bad Request", "password: printable characters, max 128");
+    ESP_LOGI(TAG, "MQTT password %s", p.empty() ? "cleared" : "updated");
+    hamqtt::apply_settings();
+    return send_ok(req);
 }
 
 esp_err_t h_export(httpd_req_t* req) {
@@ -595,6 +678,7 @@ void register_api(httpd_handle_t h) {
     add_route(h, "/api/log", HTTP_GET, h_log, R_AUTH);
     add_route(h, "/api/settings", HTTP_GET, h_settings_get, R_AUTH);
     add_route(h, "/api/settings", HTTP_POST, h_settings_post, R_AUTH);
+    add_route(h, "/api/mqtt/password", HTTP_POST, h_mqtt_password, R_AUTH);
     add_route(h, "/api/config/export", HTTP_GET, h_export, R_AUTH);
     add_route(h, "/api/config/import", HTTP_POST, h_import, R_AUTH);
     add_route(h, "/api/wifi", HTTP_POST, h_wifi, R_AUTH);

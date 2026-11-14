@@ -4,6 +4,7 @@
 
 #include "can/mcp2515_regs.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -13,7 +14,8 @@ const char* TAG = "mcp2515";
 using namespace mcp2515;
 }  // namespace
 
-esp_err_t Mcp2515::attach(spi_host_device_t host, int cs_gpio, int hz) {
+esp_err_t Mcp2515::attach(spi_host_device_t host, int cs_gpio, int hz, int port) {
+    guard_ = Guard(policy_for_port(port));
     spi_device_interface_config_t dc = {};
     dc.mode = 0;
     dc.clock_speed_hz = hz;
@@ -23,10 +25,10 @@ esp_err_t Mcp2515::attach(spi_host_device_t host, int cs_gpio, int hz) {
 }
 
 esp_err_t Mcp2515::xfer(const uint8_t* tx, uint8_t* rx, size_t len) {
-    // NO-TRANSMIT GATE: every byte sequence sent to the chip is checked.
-    if (!spi_command_allowed(tx, len)) {
+    // SPI GATE: every byte sequence sent to the chip is checked by this port's guard.
+    if (!guard_.check(tx, len, (uint64_t)(esp_timer_get_time() / 1000))) {
         blocked_++;
-        ESP_LOGE(TAG, "BLOCKED SPI command 0x%02x (would allow transmit)", tx[0]);
+        ESP_LOGE(TAG, "BLOCKED SPI command 0x%02x (not allowed on this port)", tx[0]);
         return ESP_ERR_NOT_ALLOWED;
     }
     spi_transaction_t t = {};
@@ -52,6 +54,13 @@ esp_err_t Mcp2515::bit_modify(uint8_t addr, uint8_t mask, uint8_t v) {
     return xfer(tx, rx, 4);
 }
 
+esp_err_t Mcp2515::reset() {
+    uint8_t rst = INS_RESET, dummy;
+    esp_err_t e = xfer(&rst, &dummy, 1);
+    vTaskDelay(pdMS_TO_TICKS(5));  // oscillator start-up after reset
+    return e;
+}
+
 uint8_t Mcp2515::opmode() { return read_reg(CANSTAT) & MODE_MASK; }
 
 esp_err_t Mcp2515::enter_config() {
@@ -64,17 +73,31 @@ esp_err_t Mcp2515::enter_config() {
 }
 
 esp_err_t Mcp2515::start_listen_only(uint32_t bitrate, const char** why) {
+    return start(bitrate, MODE_LISTEN_ONLY, why);
+}
+
+esp_err_t Mcp2515::send(uint16_t id, uint8_t dlc, const uint8_t* data) {
+    if (dlc > 8) return ESP_ERR_INVALID_ARG;
+    uint8_t ctrl = read_reg(TXB0CTRL);
+    if (ctrl == 0xFF || (ctrl & TXB_TXREQ)) return ESP_ERR_INVALID_STATE;
+    uint8_t tx[14] = {INS_LOAD_TX0, (uint8_t)(id >> 3), (uint8_t)((id & 0x07) << 5), 0, 0, dlc}, rx[14];
+    memcpy(tx + 6, data, dlc);
+    esp_err_t e = xfer(tx, rx, 6 + dlc);
+    if (e != ESP_OK) return e;
+    uint8_t rts = INS_RTS0, d;
+    return xfer(&rts, &d, 1);
+}
+
+esp_err_t Mcp2515::start(uint32_t bitrate, uint8_t mode, const char** why) {
     const BitTiming* t = timing_for(bitrate);
     if (!t) {
         *why = "unsupported bitrate for an 8 MHz crystal";
         return ESP_ERR_INVALID_ARG;
     }
-    uint8_t rst = INS_RESET, dummy;
-    xfer(&rst, &dummy, 1);
-    vTaskDelay(pdMS_TO_TICKS(5));  // oscillator start-up after reset
+    reset();
     // After reset the chip is in configuration mode (it cannot transmit).
     if (opmode() != MODE_CONFIG) {
-        *why = "MCP2515 not responding after reset (check wiring, power, CS 26)";
+        *why = "MCP2515 not responding after reset (check wiring, power, CS)";
         return ESP_ERR_NOT_FOUND;
     }
     write_reg(CNF1, t->cnf1);
@@ -86,23 +109,48 @@ esp_err_t Mcp2515::start_listen_only(uint32_t bitrate, const char** why) {
     }
     write_reg(TXRTSCTRL, 0x00);  // TXnRTS pins are plain inputs, cannot request TX
     write_reg(BFPCTRL, 0x00);    // RXnBF pins off
-    write_reg(RXB0CTRL, 0x64);   // RXM=11 (accept everything), BUKT=1 (roll over to RXB1)
-    write_reg(RXB1CTRL, 0x60);   // RXM=11
+    // Receive every VALID frame, standard and extended. Not RXM=11: in that (debug) mode the
+    // MCP2515 also loads a message that had an error before EOF, as far as it was assembled
+    // (datasheet 4.2): that produced the phantom 0x71F/zero frames on port INV at the first
+    // transmit after the start-up hold, and corrupt frames during bus errors. Bus errors are
+    // still counted (MERR/ERR interrupts). Masks 0 = all bits "don't care"; the filters' EXIDE
+    // bit still selects standard/extended and is undefined after reset, so all six are written:
+    // RXF0/2/4 standard, RXF1/3/5 extended.
+    static const uint8_t kFilt[6] = {0x00, 0x04, 0x08, 0x10, 0x14, 0x18};  // RXFnSIDH addresses
+    for (int f = 0; f < 6; f++) {
+        write_reg(kFilt[f], 0x00);
+        write_reg((uint8_t)(kFilt[f] + 1), (f & 1) ? 0x08 : 0x00);  // SIDL: EXIDE
+        write_reg((uint8_t)(kFilt[f] + 2), 0x00);
+        write_reg((uint8_t)(kFilt[f] + 3), 0x00);
+    }
+    for (uint8_t a = 0x20; a <= 0x27; a++) write_reg(a, 0x00);  // RXM0, RXM1: accept all
+    write_reg(RXB0CTRL, 0x04);   // RXM=00 (valid frames through the filters), BUKT=1 (roll over to RXB1)
+    write_reg(RXB1CTRL, 0x00);   // RXM=00
+    if (read_reg(RXB0CTRL) & 0x60 || read_reg(0x05) != 0x08 || read_reg(0x21) != 0x00) {
+        *why = "MCP2515 receive filter set-up did not read back";
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     write_reg(CANINTF, 0x00);
     write_reg(CANINTE, INT_RX0 | INT_RX1 | INT_ERR | INT_MERR);
-    write_reg(CANCTRL, MODE_LISTEN_ONLY);
+    if (write_reg(CANCTRL, mode) != ESP_OK) {
+        enter_config();
+        *why = "operating mode not allowed on this port (SPI guard)";
+        return ESP_ERR_NOT_ALLOWED;
+    }
     for (int i = 0; i < 20; i++) {
-        if (opmode() == MODE_LISTEN_ONLY) {
+        if (opmode() == (mode & MODE_MASK)) {
             auto f = decode_timing(8000000, t->cnf1, t->cnf2, t->cnf3);
-            ESP_LOGI(TAG, "listen-only at %lu bit/s (%u TQ, sample point %u.%u%%)",
-                     (unsigned long)f.bitrate, f.tq_per_bit, f.sample_permille / 10,
-                     f.sample_permille % 10);
+            ESP_LOGI(TAG, "%s at %lu bit/s (%u TQ, sample point %u.%u%%)",
+                     (mode & MODE_MASK) == MODE_LISTEN_ONLY ? "listen-only"
+                     : (mode & CANCTRL_OSM)                 ? "normal, one-shot"
+                                                            : "normal (ACK only)",
+                     (unsigned long)f.bitrate, f.tq_per_bit, f.sample_permille / 10, f.sample_permille % 10);
             return ESP_OK;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     enter_config();
-    *why = "MCP2515 did not confirm listen-only mode";
+    *why = "MCP2515 did not confirm the operating mode";
     return ESP_ERR_TIMEOUT;
 }
 
